@@ -1,0 +1,19 @@
+numpy
+pillow
+fastapi
+pydantic
+pyside6
+ipywidgets
+ipython
+python-multipart
+uvicorn
+httpx
+pyinstaller
+mkdocs<2
+mkdocs-material
+mkdocstrings[python]
+pymdown-extensions
+pytest
+ruff
+ty
+mlx; platform_system == "Darwin" and platform_machine == "arm64"

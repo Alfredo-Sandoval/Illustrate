@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.egg-info/
+venv/
+.env
+.env.*
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.ruff_cache/
+.pytype/
+.venv/
+
+# Distribution / packaging
+build/
+dist/
+*.egg
+.eggs/
+.Python
+*.whl
+*.tar.gz
+
+# Test and docs artifacts
+.pycov/
+coverage/
+htmlcov/
+.coverage
+.coverage.*
+site/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+tmp*/
+.temp/
+
+# Notebooks/checkpoints
+.ipynb_checkpoints/
+
+# Regenerable render output
+renders/
+
+# Local scratch/tooling output
+.agent_logs
+.port_oracle
+.claude
+AGENTS.md
+skills.json
+repo_profile.yaml
+
+# Frontend build artifacts
+node_modules/
+**/.next/
+**/.next_*/
+**/out/
+.turbo/
+**/next-env.d.ts
+**/*.tsbuildinfo
+
+# Type checker caches
+ty_cache/

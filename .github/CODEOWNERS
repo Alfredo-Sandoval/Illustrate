@@ -1,0 +1,16 @@
+# Fallback owners for any unmatched path.
+* @Alfredo-Sandoval
+
+# Repository setup and environment ownership.
+/environment/ @Alfredo-Sandoval
+/Makefile @Alfredo-Sandoval
+/repo_profile.yaml @Alfredo-Sandoval
+/AGENTS.md @Alfredo-Sandoval
+
+# Documentation ownership.
+/README.md @Alfredo-Sandoval
+/docs/ @Alfredo-Sandoval
+
+# Optional runtime-critical frontend/backend boundaries.
+/illustrate_web/ @Alfredo-Sandoval
+/illustrate_gui/ @Alfredo-Sandoval

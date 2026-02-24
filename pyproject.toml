@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "illustrate"
+version = "0.0.0"
+description = "Molecule illustration renderer and frontends"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "numpy",
+  "pillow",
+]
+
+[project.optional-dependencies]
+gui = [
+  "pyside6",
+]
+web = [
+  "fastapi",
+]
+notebook = [
+  "ipywidgets",
+  "ipython",
+]
+
+[project.scripts]
+illustrate-py = "illustrate.cli:main"
+illustrate-gui = "illustrate_gui.main:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = [
+  "illustrate",
+  "illustrate_gui",
+  "illustrate_gui.panels",
+  "illustrate_web",
+  "illustrate_web.api",
+  "illustrate_web.api.routes"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-q"]
+markers = [
+  "port: porting workflow tests",
+  "parity: source-vs-target parity tests",
+]
