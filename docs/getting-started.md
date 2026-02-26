@@ -1,11 +1,41 @@
 # Getting Started
 
-## Quick install
+## Quick install (non-developers)
 
 ```bash
 git clone https://github.com/Alfredo-Sandoval/Illustrate.git
 cd Illustrate
-pip install -e .
+make start
+```
+
+This is the recommended path if you just want the desktop app.
+
+`make start` automatically:
+
+- installs `micromamba` if it is missing
+- creates the managed `illustrate` environment
+- installs the GUI runtime from this repository
+- launches `illustrate-gui`
+
+On macOS, you can double-click `Illustrate.command` to run the same flow.
+
+If you want to install without launching:
+
+```bash
+make install-desktop
+```
+
+If release installers are available, you can use packaged desktop builds instead:
+
+- macOS `.dmg`
+- Windows `.zip` app bundle
+
+## Developer setup (optional)
+
+For full development tooling (lint/typecheck/tests/docs), run:
+
+```bash
+make env
 ```
 
 Requires Python 3.9+.
@@ -22,25 +52,6 @@ pip install -e ".[gui]"       # desktop GUI (PySide6)
 pip install -e ".[web]"       # FastAPI models/routes package
 pip install -e ".[notebook]"  # ipython + ipywidgets
 ```
-
-For full development tooling (lint/typecheck/tests/docs), run:
-
-```bash
-make env
-```
-
-## Easiest desktop launch
-
-```bash
-make start
-```
-
-On macOS, double-click `Illustrate.command` to run the same launcher.
-
-If release installers are available, you can use packaged desktop builds instead:
-
-- macOS `.dmg`
-- Windows `.zip` app bundle
 
 ## Render from the CLI
 

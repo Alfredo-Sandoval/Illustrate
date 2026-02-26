@@ -72,11 +72,6 @@ else
   exit 1
 fi
 
-if ! command -v uv >/dev/null 2>&1; then
-  echo "Missing dependency: install uv." >&2
-  exit 1
-fi
-
 ENV_NAME="$(awk -F':' '/^name:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "${ENV_FILE}")"
 if [[ -z "${ENV_NAME}" ]]; then
   echo "Could not parse environment name from ${ENV_FILE}. Expected 'name: <env_name>'." >&2
@@ -87,6 +82,11 @@ if "${MAMBA_BIN}" env list | awk '{print $1}' | grep -Fxq "${ENV_NAME}"; then
   "${MAMBA_BIN}" env update -n "${ENV_NAME}" -f "${ENV_FILE}" --prune -y
 else
   "${MAMBA_BIN}" env create -n "${ENV_NAME}" -f "${ENV_FILE}" -y
+fi
+
+if ! "${MAMBA_BIN}" run -n "${ENV_NAME}" uv --version >/dev/null 2>&1; then
+  echo "Missing dependency in environment '${ENV_NAME}': uv (expected from ${ENV_FILE})." >&2
+  exit 1
 fi
 
 "${MAMBA_BIN}" run -n "${ENV_NAME}" uv pip install -r "${REQ_FILE}"

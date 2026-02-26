@@ -1,5 +1,5 @@
 # Template preset: base/python-first quality gates.
-.PHONY: env setup bootstrap start package package-macos package-windows env-macos env-linux env-windows loc lint typecheck test qa docs-build docs-serve docs-check clean
+.PHONY: env setup bootstrap install-desktop start package package-macos package-windows env-macos env-linux env-windows loc lint typecheck test qa docs-build docs-serve docs-check clean
 
 ENV_ARGS ?=
 PYTHON ?= python
@@ -17,6 +17,10 @@ env:
 setup: env
 
 bootstrap: env
+
+install-desktop:
+	@test -f environment/install_desktop.sh || { echo "Missing installer: environment/install_desktop.sh"; exit 1; }
+	bash environment/install_desktop.sh
 
 start:
 	@test -f environment/run_gui.sh || { echo "Missing launcher: environment/run_gui.sh"; exit 1; }

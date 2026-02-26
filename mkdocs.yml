@@ -1,5 +1,5 @@
 site_name: Illustrate
-site_description: Non-photorealistic molecular illustration renderer — Python port of David Goodsell's classic renderer
+site_description: Non-photorealistic molecular illustration renderer — Python implementation of David Goodsell's illustration algorithm
 repo_url: https://github.com/Alfredo-Sandoval/Illustrate
 repo_name: Illustrate
 

@@ -2,25 +2,50 @@
 
 ## Installation
 
-**`ModuleNotFoundError: No module named 'illustrate'`**
+**`Could not download micromamba`**
 
-Install the package in the current environment:
+Your network may be blocking `https://micro.mamba.pm/`.
+
+Try one of these:
+
+- Re-run behind an unrestricted network/VPN.
+- Install micromamba manually, then retry:
 
 ```bash
-pip install -e .
+make install-desktop
 ```
 
-**`ModuleNotFoundError: No module named 'PySide6'`**
+**`Missing dependency: curl`** or **`Missing dependency: tar`**
 
-Install GUI extras:
+The automatic bootstrap requires `curl` and `tar`. Install those tools from your OS package manager, then run:
 
 ```bash
-pip install -e ".[gui]"
+make install-desktop
+```
+
+**`ModuleNotFoundError: No module named 'illustrate'`** (or `PySide6`)
+
+Repair the managed desktop runtime:
+
+```bash
+make install-desktop
+```
+
+Then launch:
+
+```bash
+make start
 ```
 
 **`illustrate-py: command not found`**
 
-Reinstall package entry points:
+If you are using the managed environment path, reinstall runtime first:
+
+```bash
+make install-desktop
+```
+
+If you are using a custom Python environment instead:
 
 ```bash
 pip install -e .

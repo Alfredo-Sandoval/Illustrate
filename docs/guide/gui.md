@@ -7,6 +7,12 @@
 ## Launch
 
 ```bash
+make start
+```
+
+For users already inside a configured Python environment:
+
+```bash
 illustrate-gui
 ```
 

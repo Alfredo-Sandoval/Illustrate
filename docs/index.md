@@ -57,8 +57,10 @@ document.querySelectorAll('.preset-thumb[data-href]').forEach(function(el) {
 ```bash
 git clone https://github.com/Alfredo-Sandoval/Illustrate.git
 cd Illustrate
-pip install -e .
+make start
 ```
+
+`make start` auto-installs the desktop runtime and launches the GUI.
 
 ```python
 from illustrate.fetch import fetch_pdb
