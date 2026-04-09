@@ -89,18 +89,23 @@ def _as_mlx_array(value: Any, *, dtype: Any | None = None) -> Any:
 
 @lru_cache(maxsize=8)
 def _shadow_offset_chunks(chunk_size: int) -> tuple[tuple[tuple[int, int, float], ...], ...]:
+    if chunk_size <= 0:
+        raise ValueError(f"shadow chunk size must be positive, got {chunk_size}")
     return tuple(
         tuple(_SHADOW_OFFSETS[start : start + chunk_size])
         for start in range(0, len(_SHADOW_OFFSETS), chunk_size)
     )
 
 
-@lru_cache(maxsize=1)
-def _mlx_shadow_chunk_radii() -> tuple[Any, ...]:
+@lru_cache(maxsize=8)
+def _mlx_shadow_chunk_radii(chunk_size: int) -> tuple[Any, ...]:
     mx = _require_mlx()
     return tuple(
-        _as_mlx_array(np.array([radius for _di, _dj, radius in chunk], dtype=np.float32), dtype=mx.float32)[:, None, None]
-        for chunk in _shadow_offset_chunks(_MLX_SHADOW_CHUNK)
+        _as_mlx_array(
+            np.array([radius for _di, _dj, radius in chunk], dtype=np.float32),
+            dtype=mx.float32,
+        )[:, None, None]
+        for chunk in _shadow_offset_chunks(chunk_size)
     )
 
 
@@ -252,54 +257,36 @@ def _raster_chunk_mlx(
     x_max = float(zpix_mx.shape[0])
     y_max = float(zpix_mx.shape[1])
     valid = (all_px >= 1.0) & (all_px <= x_max) & (all_py >= 1.0) & (all_py <= y_max)
-    valid_count = int(mx.sum(valid.astype(mx.int32)).item())
-    if valid_count == 0:
-        return zpix_mx, atom_buf_mx, bio_buf_mx
-
-    valid_order = mx.argsort(valid.astype(mx.int32))
-    valid_idx = mx.take(valid_order, mx.arange(valid_order.shape[0] - valid_count, valid_order.shape[0], 1))
-    valid_idx = valid_idx.astype(mx.int32)
-
-    ipx_v = mx.take(all_px, valid_idx).astype(mx.int32) - 1
-    ipy_v = mx.take(all_py, valid_idx).astype(mx.int32) - 1
-    pz_v = mx.take(all_pz, valid_idx)
-    ia_v = mx.take(mx.repeat(ia_mx, nv), valid_idx).astype(mx.int32)
-
+    zero_i = mx.zeros(valid.shape, dtype=mx.int32)
+    invalid_depth = mx.full(all_pz.shape, np.float32(-100000.0), dtype=mx.float32)
+    ipx_v = mx.where(valid, all_px.astype(mx.int32) - 1, zero_i)
+    ipy_v = mx.where(valid, all_py.astype(mx.int32) - 1, zero_i)
+    pz_v = mx.where(valid, all_pz, invalid_depth)
+    ia_v = mx.repeat(ia_mx, nv).astype(mx.int32)
     width_y = int(zpix_mx.shape[1])
     linear_v = ipx_v * width_y + ipy_v
 
     zpix_flat = zpix_mx.reshape((-1,))
     zpix_flat = zpix_flat.at[linear_v].maximum(pz_v)
 
-    winners = pz_v == zpix_flat[linear_v]
-    winner_count = int(mx.sum(winners.astype(mx.int32)).item())
-    if winner_count > 0:
-        winner_order = mx.argsort(winners.astype(mx.int32))
-        winner_idx = mx.take(
-            winner_order,
-            mx.arange(winner_order.shape[0] - winner_count, winner_order.shape[0], 1),
-        )
-        winner_idx = winner_idx.astype(mx.int32)
+    winners = valid & (pz_v == zpix_flat[linear_v])
+    rank = mx.where(winners, mx.arange(linear_v.shape[0], dtype=mx.int32) + 1, zero_i)
 
-        linear_w = mx.take(linear_v, winner_idx)
-        ia_w = mx.take(ia_v, winner_idx)
+    atom_flat = atom_buf_mx.reshape((-1,))
+    rank_buf = mx.zeros(atom_flat.shape, dtype=mx.int32)
+    rank_buf = rank_buf.at[linear_v].maximum(rank)
+    touched = rank_buf > 0
 
-        rank = mx.arange(linear_w.shape[0], dtype=mx.int32) + 1
-        atom_flat = atom_buf_mx.reshape((-1,))
-        rank_buf = mx.zeros(atom_flat.shape, dtype=mx.int32)
-        rank_buf = rank_buf.at[linear_w].maximum(rank)
-        touched = rank_buf > 0
+    atom_lookup = mx.concatenate([mx.zeros((1,), dtype=mx.int32), ia_v], axis=0)
+    atom_updates = mx.take(atom_lookup, rank_buf)
+    atom_flat = mx.where(touched, atom_updates, atom_flat)
 
-        atom_lookup = mx.concatenate([mx.zeros((1,), dtype=mx.int32), ia_w], axis=0)
-        atom_updates = mx.take(atom_lookup, rank_buf)
-        atom_flat = mx.where(touched, atom_updates, atom_flat)
+    bio_flat = bio_buf_mx.reshape((-1,))
+    bio_updates = mx.full(rank_buf.shape, ibio, dtype=bio_flat.dtype)
+    bio_flat = mx.where(touched, bio_updates, bio_flat)
 
-        bio_flat = bio_buf_mx.reshape((-1,))
-        bio_updates = mx.full(rank_buf.shape, ibio, dtype=bio_flat.dtype)
-        bio_flat = mx.where(touched, bio_updates, bio_flat)
-
-        atom_buf_mx = atom_flat.reshape(atom_buf_mx.shape)
-        bio_buf_mx = bio_flat.reshape(bio_buf_mx.shape)
+    atom_buf_mx = atom_flat.reshape(atom_buf_mx.shape)
+    bio_buf_mx = bio_flat.reshape(bio_buf_mx.shape)
 
     zpix_mx = zpix_flat.reshape(zpix_mx.shape)
     return zpix_mx, atom_buf_mx, bio_buf_mx
@@ -419,9 +406,12 @@ def _shadow_cone_mlx(
     min_z = np.float32(shadow_min_z)
     angle = np.float32(shadow_angle)
     max_dark = np.float32(shadow_max_dark)
+    pix_count = max(1, height * width)
+    chunk_size = max(1, min(_MLX_SHADOW_MAX_CHUNK, _MLX_SHADOW_ELEMS_BUDGET // pix_count))
+    zpix_plane = zpix_mx[None, :, :]
+    has_atom_plane = has_atom[None, :, :]
     count = mx.zeros(zpix_mx.shape, dtype=mx.int32)
-    # Chunk offsets to keep graph compact while amortizing per-offset overhead.
-    for chunk, radii in zip(_shadow_offset_chunks(_MLX_SHADOW_CHUNK), _mlx_shadow_chunk_radii()):
+    for chunk, radii in zip(_shadow_offset_chunks(chunk_size), _mlx_shadow_chunk_radii(chunk_size)):
         shifted_z = mx.stack(
             [
                 zpix_shadow_padded[shadow_pad + di : shadow_pad + di + height, shadow_pad + dj : shadow_pad + dj + width]
@@ -429,8 +419,8 @@ def _shadow_cone_mlx(
             ],
             axis=0,
         )
-        rzdiff = shifted_z - zpix_mx[None, :, :]
-        shadow_mask: Any = has_atom[None, :, :] & (rzdiff > min_z) & ((radii * angle) < (rzdiff + min_z))
+        rzdiff = shifted_z - zpix_plane
+        shadow_mask: Any = has_atom_plane & (rzdiff > min_z) & ((radii * angle) < (rzdiff + min_z))
         count = count + mx.sum(shadow_mask.astype(mx.int32), axis=0)
 
     pconetot = np.float32(1.0) - count.astype(mx.float32) * strength
@@ -652,6 +642,7 @@ def _outline_kernel34_mlx(
     bio_padded = mx.pad(bio_mx, [(rg_pad, rg_pad), (rg_pad, rg_pad)], mode="constant", constant_values=0)
     res_padded = mx.pad(res_map, [(rg_pad, rg_pad), (rg_pad, rg_pad)], mode="constant", constant_values=9999)
     res_map_f = res_map.astype(mx.float32)
+    res_padded_f = res_padded.astype(mx.float32)
     residue_diff_f = np.float32(residue_diff)
 
     for di, dj in _RG_OFFSETS:
@@ -659,10 +650,10 @@ def _outline_kernel34_mlx(
         j0 = rg_pad + dj
         shifted_su = su_padded[i0 : i0 + height, j0 : j0 + width]
         shifted_bio = bio_padded[i0 : i0 + height, j0 : j0 + width]
-        shifted_res = res_padded[i0 : i0 + height, j0 : j0 + width]
+        shifted_res = res_padded_f[i0 : i0 + height, j0 : j0 + width]
         r_mask: Any = (su_map != shifted_su) | (bio_mx != shifted_bio)
         r_count = r_count + r_mask.astype(mx.float32)
-        g_count = g_count + (mx.abs(res_map_f - shifted_res.astype(mx.float32)) > residue_diff_f).astype(mx.float32)
+        g_count = g_count + (mx.abs(res_map_f - shifted_res) > residue_diff_f).astype(mx.float32)
 
     if residue_high != residue_low:
         g_opacity = mx.clip((g_count - residue_low) / (residue_high - residue_low), 0.0, 1.0)
@@ -685,16 +676,14 @@ def _outline_kernel34_mlx(
     denom = float(z_diff_max - z_diff_min)
     z_diff_min_f = np.float32(z_diff_min)
 
-    for di, dj in offsets_k:
-        i0 = zpad + di
-        j0 = zpad + dj
-        shifted_z = zpix_padded[i0 : i0 + height, j0 : j0 + width]
-        rd = mx.abs(zpix_mx - shifted_z)
-        if denom != 0.0:
+    if denom != 0.0:
+        for di, dj in offsets_k:
+            i0 = zpad + di
+            j0 = zpad + dj
+            shifted_z = zpix_padded[i0 : i0 + height, j0 : j0 + width]
+            rd = mx.abs(zpix_mx - shifted_z)
             rd_norm = mx.where(rd > z_diff_min_f, mx.minimum((rd - z_diff_min_f) / denom, 1.0), 0.0)
-        else:
-            rd_norm = mx.zeros_like(rd)
-        l_total = l_total + rd_norm
+            l_total = l_total + rd_norm
 
     if contour_high != contour_low:
         l_val = mx.clip((l_total - contour_low) / (contour_high - contour_low), 0.0, 1.0)
@@ -981,15 +970,16 @@ def _outline_kernel12_mlx(
     su_padded = mx.pad(su_map, [(rg_pad, rg_pad), (rg_pad, rg_pad)], mode="constant", constant_values=9999)
     bio_padded = mx.pad(bio_mx, [(rg_pad, rg_pad), (rg_pad, rg_pad)], mode="constant", constant_values=0)
     res_padded = mx.pad(res_map, [(rg_pad, rg_pad), (rg_pad, rg_pad)], mode="constant", constant_values=9999)
+    res_padded_f = res_padded.astype(mx.float32)
 
     for di, dj in _RG_OFFSETS:
         i0 = rg_pad + di
         j0 = rg_pad + dj
         shifted_su = su_padded[i0 : i0 + height, j0 : j0 + width]
         shifted_bio = bio_padded[i0 : i0 + height, j0 : j0 + width]
-        shifted_res = res_padded[i0 : i0 + height, j0 : j0 + width]
+        shifted_res = res_padded_f[i0 : i0 + height, j0 : j0 + width]
         r_count = r_count + ((su_map != shifted_su) | (bio_mx != shifted_bio)).astype(mx.float32)
-        g_count = g_count + (mx.abs(res_map_f - shifted_res.astype(mx.float32)) > residue_diff_f).astype(mx.float32)
+        g_count = g_count + (mx.abs(res_map_f - shifted_res) > residue_diff_f).astype(mx.float32)
 
     if residue_high != residue_low:
         g_opacity = mx.clip((g_count - residue_low) / (residue_high - residue_low), 0.0, 1.0)
@@ -1014,33 +1004,32 @@ def _outline_kernel12_mlx(
 
     zpad = 2
     zpix_padded = mx.pad(zpix_mx, [(zpad, zpad), (zpad, zpad)], mode="constant", constant_values=0.0)
-    shifted_z = mx.stack(
-        [zpix_padded[zpad + di : zpad + di + height, zpad + dj : zpad + dj + width] for di, dj in lap_offsets],
-        axis=0,
-    ).astype(mx.float32)
-    lap = mx.sum(shifted_z * lap_weights[:, None, None], axis=0).astype(mx.float32)
+    lap = mx.zeros((height, width), dtype=mx.float32)
+    for idx, (di, dj) in enumerate(lap_offsets):
+        shifted_z = zpix_padded[zpad + di : zpad + di + height, zpad + dj : zpad + dj + width]
+        lap = lap + shifted_z * lap_weights[idx]
     lap = mx.abs(lap / np.float32(3.0))
 
-    rl = mx.zeros((height, width), dtype=mx.float32)
-    l_opacity_ave = mx.zeros((height, width), dtype=mx.float32)
-    l_center = mx.zeros((height, width), dtype=mx.float32)
-    lap_pad = 1
-    lap_padded = mx.pad(lap, [(lap_pad, lap_pad), (lap_pad, lap_pad)], mode="constant", constant_values=0.0)
     denom = float(contour_high - contour_low)
+    if denom != 0.0:
+        rl = mx.zeros((height, width), dtype=mx.float32)
+        l_opacity_ave = mx.zeros((height, width), dtype=mx.float32)
+        l_center = mx.zeros((height, width), dtype=mx.float32)
+        lap_pad = 1
+        lap_padded = mx.pad(lap, [(lap_pad, lap_pad), (lap_pad, lap_pad)], mode="constant", constant_values=0.0)
 
-    for di, dj in _LAPLACE_NEIGHBOR_OFFSETS:
-        shifted = lap_padded[lap_pad + di : lap_pad + di + height, lap_pad + dj : lap_pad + dj + width]
-        if denom != 0.0:
+        for di, dj in _LAPLACE_NEIGHBOR_OFFSETS:
+            shifted = lap_padded[lap_pad + di : lap_pad + di + height, lap_pad + dj : lap_pad + dj + width]
             l_v = mx.clip((shifted - contour_low) / denom, 0.0, 1.0).astype(mx.float32)
-        else:
-            l_v = mx.zeros((height, width), dtype=mx.float32)
-        rl = rl + (l_v > 0).astype(mx.float32)
-        l_opacity_ave = l_opacity_ave + l_v
-        if di == 0 and dj == 0:
-            l_center = l_v
+            rl = rl + (l_v > 0).astype(mx.float32)
+            l_opacity_ave = l_opacity_ave + l_v
+            if di == 0 and dj == 0:
+                l_center = l_v
 
-    l_opacity = mx.where(rl >= np.float32(6.0), l_opacity_ave / np.float32(6.0), l_center)
-    l_opacity = mx.clip(l_opacity, 0.0, 1.0)
+        l_opacity = mx.where(rl >= np.float32(6.0), l_opacity_ave / np.float32(6.0), l_center)
+        l_opacity = mx.clip(l_opacity, 0.0, 1.0)
+    else:
+        l_opacity = mx.zeros((height, width), dtype=mx.float32)
     l_edge_mask: Any = (rows < 2) | (rows >= (height - 2)) | (cols < 2) | (cols >= (width - 2))
     l_opacity = mx.where(l_edge_mask, np.float32(0.0), l_opacity)
     return mx.maximum(l_opacity, g_opacity)
@@ -1221,8 +1210,9 @@ _SHADOW_OFFSETS = tuple(
 )
 _NUMPY_SHADOW_MAX_CHUNK = 16
 _NUMPY_SHADOW_ELEMS_BUDGET = 18_000_000
+_MLX_SHADOW_MAX_CHUNK = 32
+_MLX_SHADOW_ELEMS_BUDGET = 18_000_000
 _NUMPY_OUTLINE_ELEMS_BUDGET = 12_000_000
-_MLX_SHADOW_CHUNK = 32
 _RG_OFFSETS = tuple(
     (di, dj)
     for di in range(-2, 3)

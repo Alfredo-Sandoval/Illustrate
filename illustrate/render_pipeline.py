@@ -26,8 +26,8 @@ MAX_IMAGE_DIMENSION = 3000
 _CHUNK_ATOMS = 512
 _BACKEND_ARRAY_CACHE_LIMIT = 32
 
-_BackendArrayCacheKey = tuple[str, int, str, tuple[int, ...]]
-_BackendArrayCacheValue = tuple[weakref.ReferenceType[np.ndarray], Any]
+_BackendArrayCacheKey = tuple[str, object, str, tuple[int, ...]]
+_BackendArrayCacheValue = tuple[weakref.ReferenceType[np.ndarray] | None, Any]
 _BACKEND_ARRAY_CACHE: OrderedDict[_BackendArrayCacheKey, _BackendArrayCacheValue] = OrderedDict()
 
 
@@ -80,6 +80,7 @@ def _cached_backend_array(
     cpu_dtype: np.dtype[Any] | type[np.generic],
     backend_dtype_attr: str,
     cache: bool = False,
+    cache_key: object | None = None,
 ) -> Any:
     source = np.asarray(values, dtype=cpu_dtype)
     if buffers.cupy_mod is not None:
@@ -92,47 +93,58 @@ def _cached_backend_array(
         return source
 
     backend_dtype = getattr(backend_mod, backend_dtype_attr)
-    if not cache:
+    if not cache and cache_key is None:
         return getattr(backend_mod, converter_name)(source, dtype=backend_dtype)
 
-    key: _BackendArrayCacheKey = (
-        buffers.backend_name,
-        id(source),
-        source.dtype.str,
-        tuple(source.shape),
-    )
+    key_token: object = cache_key if cache_key is not None else id(source)
+    key: _BackendArrayCacheKey = (buffers.backend_name, key_token, source.dtype.str, tuple(source.shape))
     cached = _BACKEND_ARRAY_CACHE.get(key)
     if cached is not None:
         source_ref, device_array = cached
-        if source_ref() is source:
+        if source_ref is None or source_ref() is source:
             _BACKEND_ARRAY_CACHE.move_to_end(key)
             return device_array
         del _BACKEND_ARRAY_CACHE[key]
 
     device_array = getattr(backend_mod, converter_name)(source, dtype=backend_dtype)
-    _BACKEND_ARRAY_CACHE[key] = (weakref.ref(source), device_array)
+    source_ref = None if cache_key is not None else weakref.ref(source)
+    _BACKEND_ARRAY_CACHE[key] = (source_ref, device_array)
     while len(_BACKEND_ARRAY_CACHE) > _BACKEND_ARRAY_CACHE_LIMIT:
         _BACKEND_ARRAY_CACHE.popitem(last=False)
     return device_array
 
 
-def _backend_float_array(buffers: BackendBuffers, values: np.ndarray, *, cache: bool = False) -> Any:
+def _backend_float_array(
+    buffers: BackendBuffers,
+    values: np.ndarray,
+    *,
+    cache: bool = False,
+    cache_key: object | None = None,
+) -> Any:
     return _cached_backend_array(
         buffers,
         values,
         cpu_dtype=np.float32,
         backend_dtype_attr="float32",
         cache=cache,
+        cache_key=cache_key,
     )
 
 
-def _backend_int_array(buffers: BackendBuffers, values: np.ndarray, *, cache: bool = False) -> Any:
+def _backend_int_array(
+    buffers: BackendBuffers,
+    values: np.ndarray,
+    *,
+    cache: bool = False,
+    cache_key: object | None = None,
+) -> Any:
     return _cached_backend_array(
         buffers,
         values,
         cpu_dtype=np.int32,
         backend_dtype_attr="int32",
         cache=cache,
+        cache_key=cache_key,
     )
 
 
@@ -329,9 +341,10 @@ def _rasterize_atoms(
             continue
 
         nv = len(sphere)
-        sx = _backend_float_array(buffers, sphere[:, 0])
-        sy = _backend_float_array(buffers, sphere[:, 1])
-        sz = _backend_float_array(buffers, sphere[:, 2])
+        sphere_key = ("sphere", id(sphere))
+        sx = _backend_float_array(buffers, sphere[:, 0], cache_key=(sphere_key, 0))
+        sy = _backend_float_array(buffers, sphere[:, 1], cache_key=(sphere_key, 1))
+        sz = _backend_float_array(buffers, sphere[:, 2], cache_key=(sphere_key, 2))
 
         for ibio in range(1, layout.nbiomat + 1):
             bm = layout.biomats[ibio]

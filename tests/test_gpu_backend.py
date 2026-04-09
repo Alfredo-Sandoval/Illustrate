@@ -268,6 +268,165 @@ def test_shadow_kernel_contract_numpy_vs_mlx() -> None:
     assert np.max(np.abs(numpy_out - mlx_np)) <= 1e-5
 
 
+def test_shadow_kernel_mlx_stays_backend_native_and_chunked(monkeypatch: pytest.MonkeyPatch) -> None:
+    rng = np.random.default_rng(31)
+    zpix = np.minimum(rng.normal(loc=-3.5, scale=1.4, size=(18, 20)).astype(np.float32), 0.0)
+    atom_buf = np.zeros((18, 20), dtype=np.int32)
+    atom_buf[4:15, 5:16] = 1
+
+    numpy_out = run_shadow_kernel(
+        backend="numpy",
+        zpix=zpix,
+        atom_buf=atom_buf,
+        shadow_strength=0.0023,
+        shadow_angle=2.0,
+        shadow_min_z=1.0,
+        shadow_max_dark=0.2,
+    )
+
+    class _StrictShadowArray:
+        def __init__(self, data: object) -> None:
+            self._data = np.asarray(data)
+
+        @property
+        def shape(self) -> tuple[int, ...]:
+            return self._data.shape
+
+        @property
+        def dtype(self) -> np.dtype[Any]:
+            return self._data.dtype
+
+        def __array__(self, dtype: np.dtype[Any] | None = None, copy: bool | None = None) -> np.ndarray:
+            del copy
+            return np.asarray(self._data, dtype=dtype)
+
+        def __getitem__(self, item: object) -> _StrictShadowArray:
+            return _StrictShadowArray(self._data[item])
+
+        def __len__(self) -> int:
+            return len(self._data)
+
+        def astype(self, dtype: np.dtype | type[np.generic]) -> _StrictShadowArray:
+            return _StrictShadowArray(self._data.astype(dtype))
+
+        def reshape(self, shape: tuple[int, ...]) -> _StrictShadowArray:
+            return _StrictShadowArray(self._data.reshape(shape))
+
+        def _binary(self, other: object, op) -> _StrictShadowArray:
+            return _StrictShadowArray(op(self._data, np.asarray(other)))
+
+        def __add__(self, other: object) -> _StrictShadowArray:
+            return self._binary(other, np.add)
+
+        def __sub__(self, other: object) -> _StrictShadowArray:
+            return self._binary(other, np.subtract)
+
+        def __mul__(self, other: object) -> _StrictShadowArray:
+            return self._binary(other, np.multiply)
+
+        def __rmul__(self, other: object) -> _StrictShadowArray:
+            return self._binary(other, np.multiply)
+
+        def __and__(self, other: object) -> _StrictShadowArray:
+            return self._binary(other, np.logical_and)
+
+        def __or__(self, other: object) -> _StrictShadowArray:
+            return self._binary(other, np.logical_or)
+
+        def __lt__(self, other: object) -> _StrictShadowArray:
+            return self._binary(other, np.less)
+
+        def __le__(self, other: object) -> _StrictShadowArray:
+            return self._binary(other, np.less_equal)
+
+        def __gt__(self, other: object) -> _StrictShadowArray:
+            return self._binary(other, np.greater)
+
+        def __ge__(self, other: object) -> _StrictShadowArray:
+            return self._binary(other, np.greater_equal)
+
+        def __eq__(self, other: object) -> Any:
+            return self._binary(other, np.equal)
+
+        def __ne__(self, other: object) -> Any:
+            return self._binary(other, np.not_equal)
+
+        def item(self) -> object:
+            raise AssertionError("MLX shadow path should not read scalars back to host")
+
+    class _StrictShadowMlxModule:
+        def __init__(self) -> None:
+            self.float32 = np.float32
+            self.int32 = np.int32
+            self.stack_calls = 0
+            self.stack_shapes: list[tuple[int, ...]] = []
+            self.stack_types: list[tuple[type[object], ...]] = []
+
+        def array(self, values: object, dtype: np.dtype | type[np.generic] | None = None) -> _StrictShadowArray:
+            return _StrictShadowArray(np.asarray(values, dtype=dtype))
+
+        def zeros(self, shape: tuple[int, ...], dtype: np.dtype | type[np.generic] = np.float32) -> _StrictShadowArray:
+            return _StrictShadowArray(np.zeros(shape, dtype=dtype))
+
+        def ones(self, shape: tuple[int, ...], dtype: np.dtype | type[np.generic] = np.float32) -> _StrictShadowArray:
+            return _StrictShadowArray(np.ones(shape, dtype=dtype))
+
+        def full(
+            self,
+            shape: tuple[int, ...],
+            fill_value: object,
+            dtype: np.dtype | type[np.generic] = np.float32,
+        ) -> _StrictShadowArray:
+            return _StrictShadowArray(np.full(shape, fill_value, dtype=dtype))
+
+        def pad(self, values: object, pad_width: object, mode: str = "constant", constant_values: object = 0) -> _StrictShadowArray:
+            del mode
+            return _StrictShadowArray(np.pad(np.asarray(values), pad_width, mode="constant", constant_values=constant_values))
+
+        def stack(self, values: list[object], axis: int = 0) -> _StrictShadowArray:
+            del axis
+            self.stack_calls += 1
+            self.stack_types.append(tuple(type(value) for value in values))
+            stacked = np.stack([np.asarray(value) for value in values], axis=0)
+            self.stack_shapes.append(stacked.shape)
+            return _StrictShadowArray(stacked)
+
+        def sum(self, values: object, axis: int | None = None) -> _StrictShadowArray:
+            return _StrictShadowArray(np.sum(np.asarray(values), axis=axis))
+
+        def maximum(self, x: object, y: object) -> _StrictShadowArray:
+            return _StrictShadowArray(np.maximum(np.asarray(x), np.asarray(y)))
+
+        def where(self, condition: object, x: object, y: object) -> _StrictShadowArray:
+            return _StrictShadowArray(np.where(np.asarray(condition), np.asarray(x), np.asarray(y)))
+
+    mx = _StrictShadowMlxModule()
+    raster_kernel_module._mlx_array_type.cache_clear()
+    raster_kernel_module._mlx_shadow_chunk_radii.cache_clear()
+    monkeypatch.setattr(raster_kernel_module, "_require_mlx", lambda: mx)
+
+    try:
+        actual = raster_kernel_module._shadow_cone_mlx(
+            zpix=zpix,
+            atom_buf=atom_buf,
+            shadow_strength=0.0023,
+            shadow_angle=2.0,
+            shadow_min_z=1.0,
+            shadow_max_dark=0.2,
+        )
+    finally:
+        raster_kernel_module._mlx_array_type.cache_clear()
+        raster_kernel_module._mlx_shadow_chunk_radii.cache_clear()
+
+    actual_np = np.array(actual, dtype=np.float32)
+    assert actual_np.shape == numpy_out.shape
+    assert np.max(np.abs(actual_np - numpy_out)) <= 1e-5
+    assert mx.stack_calls > 0
+    assert len(mx.stack_shapes) == mx.stack_calls
+    assert all(shape[0] <= raster_kernel_module._MLX_SHADOW_MAX_CHUNK for shape in mx.stack_shapes)
+    assert all(all(t is _StrictShadowArray for t in call) for call in mx.stack_types)
+
+
 def _outline12_reference(
     *,
     zpix: np.ndarray,
@@ -490,6 +649,158 @@ def test_outline12_kernel_dispatch_supports_gpu_backends_via_monkeypatch(
         assert np.max(np.abs(actual - expected)) <= 1e-5
 
     assert calls == [backend_name, backend_name]
+
+
+def test_outline12_kernel_mlx_avoids_stacked_laplacian_planes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(29)
+    zpix = np.minimum(rng.normal(loc=-2.2, scale=1.4, size=(18, 20)).astype(np.float32), 0.0)
+    atom_buf = rng.integers(0, 8, size=(18, 20), dtype=np.int32)
+    bio_buf = rng.integers(1, 4, size=(18, 20), dtype=np.int32)
+    su_lookup = np.array([0, 1, 1, 2, 2, 3, 3, 4], dtype=np.int32)
+    res_lookup = np.array([0, 10, 20, 30, 40, 50, 60, 70], dtype=np.int32)
+
+    class _NoStackOutlineArray:
+        def __init__(self, data: object) -> None:
+            self._data = np.asarray(data)
+
+        @property
+        def shape(self) -> tuple[int, ...]:
+            return self._data.shape
+
+        @property
+        def dtype(self) -> np.dtype[Any]:
+            return self._data.dtype
+
+        def __array__(self, dtype: np.dtype[Any] | None = None, copy: bool | None = None) -> np.ndarray:
+            del copy
+            return np.asarray(self._data, dtype=dtype)
+
+        def __getitem__(self, item: object) -> "_NoStackOutlineArray":
+            return _NoStackOutlineArray(self._data[item])
+
+        def _binary(self, other: object, op) -> "_NoStackOutlineArray":
+            return _NoStackOutlineArray(op(self._data, np.asarray(other)))
+
+        def __add__(self, other: object) -> "_NoStackOutlineArray":
+            return self._binary(other, np.add)
+
+        def __sub__(self, other: object) -> "_NoStackOutlineArray":
+            return self._binary(other, np.subtract)
+
+        def __mul__(self, other: object) -> "_NoStackOutlineArray":
+            return self._binary(other, np.multiply)
+
+        def __rmul__(self, other: object) -> "_NoStackOutlineArray":
+            return self._binary(other, np.multiply)
+
+        def __truediv__(self, other: object) -> "_NoStackOutlineArray":
+            return self._binary(other, np.divide)
+
+        def __gt__(self, other: object) -> "_NoStackOutlineArray":
+            return self._binary(other, np.greater)
+
+        def __ge__(self, other: object) -> "_NoStackOutlineArray":
+            return self._binary(other, np.greater_equal)
+
+        def __lt__(self, other: object) -> "_NoStackOutlineArray":
+            return self._binary(other, np.less)
+
+        def __le__(self, other: object) -> "_NoStackOutlineArray":
+            return self._binary(other, np.less_equal)
+
+        def __and__(self, other: object) -> "_NoStackOutlineArray":
+            return self._binary(other, np.logical_and)
+
+        def __or__(self, other: object) -> "_NoStackOutlineArray":
+            return self._binary(other, np.logical_or)
+
+        def __eq__(self, other: object) -> Any:
+            return self._binary(other, np.equal)
+
+        def __ne__(self, other: object) -> Any:
+            return self._binary(other, np.not_equal)
+
+        def astype(self, dtype: np.dtype | type[np.generic]) -> "_NoStackOutlineArray":
+            return _NoStackOutlineArray(self._data.astype(dtype))
+
+    class _NoStackOutlineMlxModule:
+        def __init__(self) -> None:
+            self.float32 = np.float32
+            self.int32 = np.int32
+
+        def array(self, values: object, dtype: np.dtype | type[np.generic] | None = None) -> _NoStackOutlineArray:
+            return _NoStackOutlineArray(np.asarray(values, dtype=dtype))
+
+        def zeros(self, shape: tuple[int, ...], dtype: np.dtype | type[np.generic] = np.float32) -> _NoStackOutlineArray:
+            return _NoStackOutlineArray(np.zeros(shape, dtype=dtype))
+
+        def pad(self, values: object, pad_width: object, mode: str = "constant", constant_values: object = 0) -> _NoStackOutlineArray:
+            del mode
+            return _NoStackOutlineArray(np.pad(np.asarray(values), pad_width, mode="constant", constant_values=constant_values))
+
+        def take(self, values: object, indices: object, axis: int | None = None) -> _NoStackOutlineArray:
+            return _NoStackOutlineArray(np.take(np.asarray(values), np.asarray(indices), axis=axis))
+
+        def abs(self, values: object) -> _NoStackOutlineArray:
+            return _NoStackOutlineArray(np.abs(np.asarray(values)))
+
+        def clip(self, values: object, min_value: object, max_value: object) -> _NoStackOutlineArray:
+            return _NoStackOutlineArray(np.clip(np.asarray(values), min_value, max_value))
+
+        def arange(self, *args: object, dtype: np.dtype | type[np.generic] | None = None) -> _NoStackOutlineArray:
+            return _NoStackOutlineArray(np.arange(*args, dtype=dtype))
+
+        def where(self, condition: object, x: object, y: object) -> _NoStackOutlineArray:
+            return _NoStackOutlineArray(np.where(np.asarray(condition), np.asarray(x), np.asarray(y)))
+
+        def maximum(self, x: object, y: object) -> _NoStackOutlineArray:
+            return _NoStackOutlineArray(np.maximum(np.asarray(x), np.asarray(y)))
+
+    mx = _NoStackOutlineMlxModule()
+    raster_kernel_module._mlx_array_type.cache_clear()
+    raster_kernel_module._mlx_outline12_lap_weights.cache_clear()
+    monkeypatch.setattr(raster_kernel_module, "_require_mlx", lambda: mx)
+
+    try:
+        for kernel in (1, 2):
+            actual = raster_kernel_module._outline_kernel12_mlx(
+                zpix=zpix,
+                atom_buf=atom_buf,
+                bio_buf=bio_buf,
+                su_lookup=su_lookup,
+                res_lookup=res_lookup,
+                residue_diff=5.0,
+                residue_low=3.0,
+                residue_high=8.0,
+                subunit_low=3.0,
+                subunit_high=10.0,
+                contour_low=3.0,
+                contour_high=10.0,
+                kernel=kernel,
+            )
+            expected = _outline12_reference(
+                zpix=zpix,
+                atom_buf=atom_buf,
+                bio_buf=bio_buf,
+                su_lookup=su_lookup,
+                res_lookup=res_lookup,
+                residue_diff=5.0,
+                residue_low=3.0,
+                residue_high=8.0,
+                subunit_low=3.0,
+                subunit_high=10.0,
+                contour_low=3.0,
+                contour_high=10.0,
+                kernel=kernel,
+            )
+            actual_np = np.asarray(actual, dtype=np.float32)
+            assert actual_np.shape == expected.shape
+            assert np.max(np.abs(actual_np - expected)) <= 1e-5
+    finally:
+        raster_kernel_module._mlx_array_type.cache_clear()
+        raster_kernel_module._mlx_outline12_lap_weights.cache_clear()
 
 
 def test_outline_kernel34_contract_numpy_vs_mlx() -> None:
@@ -931,6 +1242,7 @@ def test_rasterize_atoms_uploads_backend_arrays_once_per_visible_batch(
     program = render_module._program_from_params(params)
     scene = render_pipeline_module.prepare_scene(program, atoms)
     fake_backend = _FakeBackendModule(mode=backend_name)
+    render_pipeline_module._BACKEND_ARRAY_CACHE.clear()
 
     buffers = render_pipeline_module.BackendBuffers(
         backend_name=backend_name,
@@ -958,6 +1270,268 @@ def test_rasterize_atoms_uploads_backend_arrays_once_per_visible_batch(
     assert fake_backend.calls[kernel_name] == 7
     other_kernel = "array" if kernel_name == "asarray" else "asarray"
     assert fake_backend.calls[other_kernel] == 0
+
+
+@pytest.mark.parametrize("backend_name, kernel_name", [("cupy", "asarray"), ("mlx", "array")])
+def test_rasterize_atoms_reuses_cached_sphere_axes_across_render_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_name: str,
+    kernel_name: str,
+) -> None:
+    pdb_path = tmp_path / "many_atoms.pdb"
+    _write_multi_atom_pdb(pdb_path, 600)
+    params = _minimal_params(pdb_path)
+    atoms = load_pdb(pdb_path, params.rules)
+    program = render_module._program_from_params(params)
+    scene = render_pipeline_module.prepare_scene(program, atoms)
+    fake_backend = _FakeBackendModule(mode=backend_name)
+
+    render_pipeline_module._BACKEND_ARRAY_CACHE.clear()
+
+    def make_buffers() -> render_pipeline_module.BackendBuffers:
+        return render_pipeline_module.BackendBuffers(
+            backend_name=backend_name,
+            zpix=_FakeGPUArray(np.full((scene.layout.width, scene.layout.height), -10000.0, dtype=np.float32)),
+            atom_buf=_FakeGPUArray(np.zeros((scene.layout.width, scene.layout.height), dtype=np.int32)),
+            bio_buf=_FakeGPUArray(np.ones((scene.layout.width, scene.layout.height), dtype=np.int32)),
+            cupy_mod=fake_backend if backend_name == "cupy" else None,
+            mlx_mod=fake_backend if backend_name == "mlx" else None,
+        )
+
+    seen_spheres: list[tuple[object, object, object]] = []
+    calls = {"chunks": 0}
+
+    def fake_run_kernel(**kwargs):
+        calls["chunks"] += 1
+        if calls["chunks"] in {1, 3}:
+            seen_spheres.append((kwargs["sx"], kwargs["sy"], kwargs["sz"]))
+        return kwargs["zpix"], kwargs["atom_buf"], kwargs["bio_buf"]
+
+    monkeypatch.setattr(render_pipeline_module, "run_kernel", fake_run_kernel)
+
+    render_pipeline_module._rasterize_atoms(scene, atoms, make_buffers(), render_module._precompute_sphere)
+    render_pipeline_module._rasterize_atoms(scene, atoms, make_buffers(), render_module._precompute_sphere)
+
+    assert calls["chunks"] == 4
+    assert len(seen_spheres) == 2
+    assert seen_spheres[0][0] is seen_spheres[1][0]
+    assert seen_spheres[0][1] is seen_spheres[1][1]
+    assert seen_spheres[0][2] is seen_spheres[1][2]
+    assert fake_backend.calls[kernel_name] == 11
+    other_kernel = "array" if kernel_name == "asarray" else "asarray"
+    assert fake_backend.calls[other_kernel] == 0
+
+
+def test_raster_chunk_mlx_avoids_scalar_item_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StrictScalar:
+        def __init__(self, value: int) -> None:
+            self._value = value
+
+        def item(self) -> int:
+            raise AssertionError("MLX raster chunk path should not call scalar .item()")
+
+        def __int__(self) -> int:
+            return self._value
+
+        def __float__(self) -> float:
+            return float(self._value)
+
+        def __array__(self, dtype: np.dtype[Any] | None = None) -> np.ndarray:
+            return np.asarray(self._value, dtype=dtype)
+
+    class _AtUpdater:
+        def __init__(self, base: "_StrictMlxArray") -> None:
+            self._base = base
+            self._indices: object = None
+
+        def __getitem__(self, indices: object) -> "_AtUpdater":
+            self._indices = indices
+            return self
+
+        def maximum(self, values: object) -> "_StrictMlxArray":
+            data = self._base._data.copy()
+            data[self._indices] = np.maximum(data[self._indices], np.asarray(values, dtype=data.dtype))
+            return _StrictMlxArray(data)
+
+    class _StrictMlxArray:
+        def __init__(self, data: object) -> None:
+            self._data = np.asarray(data)
+
+        @property
+        def shape(self) -> tuple[int, ...]:
+            return self._data.shape
+
+        @property
+        def dtype(self) -> np.dtype[Any]:
+            return self._data.dtype
+
+        @property
+        def at(self) -> _AtUpdater:
+            return _AtUpdater(self)
+
+        def __array__(self, dtype: np.dtype[Any] | None = None) -> np.ndarray:
+            return np.asarray(self._data, dtype=dtype)
+
+        def __len__(self) -> int:
+            return len(self._data)
+
+        def __getitem__(self, item: object) -> _StrictMlxArray:
+            return _StrictMlxArray(self._data[item])
+
+        def _binary(self, other: object, op) -> _StrictMlxArray:
+            return _StrictMlxArray(op(self._data, np.asarray(other)))
+
+        def __add__(self, other: object) -> _StrictMlxArray:
+            return self._binary(other, np.add)
+
+        def __sub__(self, other: object) -> _StrictMlxArray:
+            return self._binary(other, np.subtract)
+
+        def __mul__(self, other: object) -> _StrictMlxArray:
+            return self._binary(other, np.multiply)
+
+        def __rmul__(self, other: object) -> _StrictMlxArray:
+            return self._binary(other, np.multiply)
+
+        def __and__(self, other: object) -> _StrictMlxArray:
+            return self._binary(other, np.logical_and)
+
+        def __or__(self, other: object) -> _StrictMlxArray:
+            return self._binary(other, np.logical_or)
+
+        def __lt__(self, other: object) -> _StrictMlxArray:
+            return self._binary(other, np.less)
+
+        def __le__(self, other: object) -> _StrictMlxArray:
+            return self._binary(other, np.less_equal)
+
+        def __gt__(self, other: object) -> _StrictMlxArray:
+            return self._binary(other, np.greater)
+
+        def __ge__(self, other: object) -> _StrictMlxArray:
+            return self._binary(other, np.greater_equal)
+
+        def __eq__(self, other: object) -> _StrictMlxArray:  # type: ignore[override]
+            return self._binary(other, np.equal)
+
+        def __ne__(self, other: object) -> _StrictMlxArray:  # type: ignore[override]
+            return self._binary(other, np.not_equal)
+
+        def astype(self, dtype: np.dtype | type[np.generic]) -> _StrictMlxArray:
+            return _StrictMlxArray(self._data.astype(dtype))
+
+        def reshape(self, shape: tuple[int, ...]) -> _StrictMlxArray:
+            return _StrictMlxArray(self._data.reshape(shape))
+
+    class _StrictMlxModule:
+        def __init__(self) -> None:
+            self.float32 = np.float32
+            self.int32 = np.int32
+
+        def array(self, values: object, dtype: np.dtype | type[np.generic] | None = None) -> _StrictMlxArray:
+            return _StrictMlxArray(np.asarray(values, dtype=dtype))
+
+        def zeros(self, shape: tuple[int, ...], dtype: np.dtype | type[np.generic] = np.float32) -> _StrictMlxArray:
+            return _StrictMlxArray(np.zeros(shape, dtype=dtype))
+
+        def ones(self, shape: tuple[int, ...], dtype: np.dtype | type[np.generic] = np.float32) -> _StrictMlxArray:
+            return _StrictMlxArray(np.ones(shape, dtype=dtype))
+
+        def full(
+            self,
+            shape: tuple[int, ...],
+            fill_value: object,
+            dtype: np.dtype | type[np.generic] = np.float32,
+        ) -> _StrictMlxArray:
+            return _StrictMlxArray(np.full(shape, fill_value, dtype=dtype))
+
+        def pad(self, values: object, pad_width: object, mode: str = "constant", constant_values: object = 0) -> _StrictMlxArray:
+            del mode
+            return _StrictMlxArray(np.pad(np.asarray(values), pad_width, mode="constant", constant_values=constant_values))
+
+        def expand_dims(self, values: object, axis: int) -> _StrictMlxArray:
+            return _StrictMlxArray(np.expand_dims(np.asarray(values), axis))
+
+        def sum(self, values: object, axis: int | None = None) -> _StrictScalar:
+            reduced = int(np.asarray(values).sum(axis=axis))
+            return _StrictScalar(reduced)
+
+        def argsort(self, values: object) -> _StrictMlxArray:
+            return _StrictMlxArray(np.argsort(np.asarray(values)))
+
+        def take(self, values: object, indices: object, axis: int | None = None) -> _StrictMlxArray:
+            return _StrictMlxArray(np.take(np.asarray(values), np.asarray(indices), axis=axis))
+
+        def arange(self, *args: object, dtype: np.dtype | type[np.generic] | None = None) -> _StrictMlxArray:
+            return _StrictMlxArray(np.arange(*args, dtype=dtype))
+
+        def repeat(self, values: object, repeats: object) -> _StrictMlxArray:
+            return _StrictMlxArray(np.repeat(np.asarray(values), repeats))
+
+        def concatenate(self, values: list[object], axis: int = 0) -> _StrictMlxArray:
+            return _StrictMlxArray(np.concatenate([np.asarray(value) for value in values], axis=axis))
+
+        def where(self, condition: object, x: object, y: object) -> _StrictMlxArray:
+            return _StrictMlxArray(np.where(np.asarray(condition), np.asarray(x), np.asarray(y)))
+
+        def maximum(self, x: object, y: object) -> _StrictMlxArray:
+            return _StrictMlxArray(np.maximum(np.asarray(x), np.asarray(y)))
+
+        def minimum(self, x: object, y: object) -> _StrictMlxArray:
+            return _StrictMlxArray(np.minimum(np.asarray(x), np.asarray(y)))
+
+        def abs(self, values: object) -> _StrictMlxArray:
+            return _StrictMlxArray(np.abs(np.asarray(values)))
+
+        def clip(self, values: object, min_value: object, max_value: object) -> _StrictMlxArray:
+            return _StrictMlxArray(np.clip(np.asarray(values), min_value, max_value))
+
+        def zeros_like(self, values: object) -> _StrictMlxArray:
+            return _StrictMlxArray(np.zeros_like(np.asarray(values)))
+
+    mx = _StrictMlxModule()
+    raster_kernel_module._mlx_array_type.cache_clear()
+
+    monkeypatch.setattr(raster_kernel_module, "_require_mlx", lambda: mx)
+    try:
+        zpix = np.full((4, 4), -10000.0, dtype=np.float32)
+        atom_buf = np.zeros((4, 4), dtype=np.int32)
+        bio_buf = np.ones((4, 4), dtype=np.int32)
+        sx = np.array([0.0], dtype=np.float32)
+        sy = np.array([0.0], dtype=np.float32)
+        sz = np.array([-4.0], dtype=np.float32)
+        c_cx = np.array([0.0], dtype=np.float32)
+        c_cy = np.array([0.0], dtype=np.float32)
+        c_cz = np.array([0.0], dtype=np.float32)
+        c_ia = np.array([1], dtype=np.int32)
+
+        zpix_out, atom_out, bio_out = raster_kernel_module._raster_chunk_mlx(
+            sx=sx,
+            sy=sy,
+            sz=sz,
+            c_cx=c_cx,
+            c_cy=c_cy,
+            c_cz=c_cz,
+            c_ia=c_ia,
+            half_ix=2.0,
+            half_iy=2.0,
+            fix=4.0,
+            fiy=4.0,
+            nv=1,
+            ibio=1,
+            zpix=zpix,
+            atom_buf=atom_buf,
+            bio_buf=bio_buf,
+        )
+    finally:
+        raster_kernel_module._mlx_array_type.cache_clear()
+
+    assert np.asarray(zpix_out, dtype=np.float32)[1, 1] == -4.0
+    assert np.asarray(atom_out, dtype=np.int32)[1, 1] == 1
+    assert np.asarray(bio_out, dtype=np.int32)[1, 1] == 1
 
 
 @pytest.mark.parametrize("backend_name", ["cupy", "mlx"])
