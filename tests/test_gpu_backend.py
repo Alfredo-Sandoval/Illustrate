@@ -91,6 +91,28 @@ class _FakeGPUArray:
     def __getitem__(self, item: object) -> _FakeGPUArray:
         return _FakeGPUArray(self._data[item], dtype=self._data.dtype)
 
+    def __setitem__(self, item: object, value: object) -> None:
+        self._data[item] = np.asarray(value)
+
+    @property
+    def at(self) -> "_FakeArrayAt":
+        return _FakeArrayAt(self)
+
+    def _binary(self, other: object, op) -> _FakeGPUArray:
+        return _FakeGPUArray(op(self._data, np.asarray(other)), dtype=self._data.dtype)
+
+    def __add__(self, other: object) -> _FakeGPUArray:
+        return self._binary(other, np.add)
+
+    def __sub__(self, other: object) -> _FakeGPUArray:
+        return self._binary(other, np.subtract)
+
+    def __mul__(self, other: object) -> _FakeGPUArray:
+        return self._binary(other, np.multiply)
+
+    def __rmul__(self, other: object) -> _FakeGPUArray:
+        return self._binary(other, np.multiply)
+
     def astype(self, dtype: np.dtype | type[np.generic]) -> _FakeGPUArray:
         return _FakeGPUArray(self._data.astype(dtype), dtype=dtype)
 
@@ -98,12 +120,32 @@ class _FakeGPUArray:
         return _FakeGPUArray(self._data.copy(), dtype=self._data.dtype)
 
 
+class _FakeArrayAt:
+    def __init__(self, target: _FakeGPUArray) -> None:
+        self._target = target
+
+    def __getitem__(self, item: object) -> "_FakeArrayAtIndexer":
+        return _FakeArrayAtIndexer(self._target, item)
+
+
+class _FakeArrayAtIndexer:
+    def __init__(self, target: _FakeGPUArray, item: object) -> None:
+        self._target = target
+        self._item = item
+
+    def subtract(self, value: object) -> _FakeGPUArray:
+        updated = np.array(self._target, copy=True)
+        updated[self._item] = updated[self._item] - np.asarray(value)
+        return _FakeGPUArray(updated, dtype=updated.dtype)
+
+
 class _FakeBackendModule:
     def __init__(self, *, mode: str) -> None:
         self.mode = mode
         self.float32 = np.float32
         self.int32 = np.int32
-        self.calls = {"array": 0, "asarray": 0, "asnumpy": 0, "eval": 0}
+        self.uint8 = np.uint8
+        self.calls = {"array": 0, "asarray": 0, "asnumpy": 0, "eval": 0, "clip": 0, "swapaxes": 0}
 
     def array(self, values: object, dtype: np.dtype | type[np.generic] | None = None) -> _FakeGPUArray:
         self.calls["array"] += 1
@@ -125,6 +167,14 @@ class _FakeBackendModule:
 
     def eval(self, *_args: object) -> None:
         self.calls["eval"] += 1
+
+    def clip(self, values: object, min_value: object, max_value: object) -> _FakeGPUArray:
+        self.calls["clip"] += 1
+        return _FakeGPUArray(np.clip(np.asarray(values), np.asarray(min_value), np.asarray(max_value)))
+
+    def swapaxes(self, values: object, axis1: int, axis2: int) -> _FakeGPUArray:
+        self.calls["swapaxes"] += 1
+        return _FakeGPUArray(np.swapaxes(np.asarray(values), axis1, axis2))
 
 
 def test_raster_kernel_dispatch_contract_keys_present() -> None:
@@ -361,6 +411,7 @@ def test_shadow_kernel_mlx_stays_backend_native_and_chunked(monkeypatch: pytest.
             self.stack_calls = 0
             self.stack_shapes: list[tuple[int, ...]] = []
             self.stack_types: list[tuple[type[object], ...]] = []
+            self.sum_dtypes: list[np.dtype[Any]] = []
 
         def array(self, values: object, dtype: np.dtype | type[np.generic] | None = None) -> _StrictShadowArray:
             return _StrictShadowArray(np.asarray(values, dtype=dtype))
@@ -392,7 +443,9 @@ def test_shadow_kernel_mlx_stays_backend_native_and_chunked(monkeypatch: pytest.
             return _StrictShadowArray(stacked)
 
         def sum(self, values: object, axis: int | None = None) -> _StrictShadowArray:
-            return _StrictShadowArray(np.sum(np.asarray(values), axis=axis))
+            values_np = np.asarray(values)
+            self.sum_dtypes.append(values_np.dtype)
+            return _StrictShadowArray(np.sum(values_np, axis=axis))
 
         def maximum(self, x: object, y: object) -> _StrictShadowArray:
             return _StrictShadowArray(np.maximum(np.asarray(x), np.asarray(y)))
@@ -425,6 +478,8 @@ def test_shadow_kernel_mlx_stays_backend_native_and_chunked(monkeypatch: pytest.
     assert len(mx.stack_shapes) == mx.stack_calls
     assert all(shape[0] <= raster_kernel_module._MLX_SHADOW_MAX_CHUNK for shape in mx.stack_shapes)
     assert all(all(t is _StrictShadowArray for t in call) for call in mx.stack_types)
+    assert mx.sum_dtypes
+    assert all(dtype == np.dtype(np.bool_) for dtype in mx.sum_dtypes)
 
 
 def _outline12_reference(
@@ -943,6 +998,159 @@ def test_composite_kernel_contract_numpy_vs_mlx() -> None:
     assert np.max(np.abs(alpha_np - alpha_mlx_np)) <= 1e-5
 
 
+def test_composite_kernel_mlx_avoids_none_index_broadcast_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(41)
+    zpix = rng.normal(loc=-2.0, scale=1.5, size=(12, 14)).astype(np.float32)
+    atom_buf = rng.integers(0, 7, size=(12, 14), dtype=np.int32)
+    pconetot = rng.uniform(0.6, 1.0, size=(12, 14)).astype(np.float32)
+    l_opacity = rng.uniform(0.0, 0.9, size=(12, 14)).astype(np.float32)
+    type_lookup = np.array([0, 3, 5, 9, 15, 23, 37, 99], dtype=np.int32)
+    colortype = rng.uniform(0.0, 1.0, size=(1001, 3)).astype(np.float32)
+    fog_color = np.array([0.8, 0.7, 0.9], dtype=np.float32)
+
+    expected_rgb, expected_alpha = raster_kernel_module._composite_numpy(
+        zpix=zpix,
+        atom_buf=atom_buf,
+        pconetot=pconetot,
+        l_opacity=l_opacity,
+        type_lookup=type_lookup,
+        colortype=colortype,
+        fog_color=fog_color,
+        fog_front=0.9,
+        fog_back=0.3,
+        zbuf_bg=-10000.0,
+    )
+
+    class _NoNoneCompositeArray:
+        __array_priority__ = 1000
+
+        def __init__(self, data: object) -> None:
+            self._data = np.asarray(data)
+
+        @property
+        def shape(self) -> tuple[int, ...]:
+            return self._data.shape
+
+        @property
+        def dtype(self) -> np.dtype[Any]:
+            return self._data.dtype
+
+        def __array__(self, dtype: np.dtype[Any] | None = None, copy: bool | None = None) -> np.ndarray:
+            del copy
+            return np.asarray(self._data, dtype=dtype)
+
+        def __getitem__(self, item: object) -> "_NoNoneCompositeArray":
+            if isinstance(item, tuple) and any(part is None for part in item):
+                raise AssertionError("MLX composite path should not use None-index broadcasting")
+            if item is None:
+                raise AssertionError("MLX composite path should not use None-index broadcasting")
+            return _NoNoneCompositeArray(self._data[item])
+
+        def _binary(self, other: object, op) -> "_NoNoneCompositeArray":
+            return _NoNoneCompositeArray(op(self._data, np.asarray(other)))
+
+        def __add__(self, other: object) -> "_NoNoneCompositeArray":
+            return self._binary(other, np.add)
+
+        def __radd__(self, other: object) -> "_NoNoneCompositeArray":
+            return self._binary(other, np.add)
+
+        def __sub__(self, other: object) -> "_NoNoneCompositeArray":
+            return self._binary(other, np.subtract)
+
+        def __rsub__(self, other: object) -> "_NoNoneCompositeArray":
+            return _NoNoneCompositeArray(np.subtract(np.asarray(other), self._data))
+
+        def __mul__(self, other: object) -> "_NoNoneCompositeArray":
+            return self._binary(other, np.multiply)
+
+        def __rmul__(self, other: object) -> "_NoNoneCompositeArray":
+            return self._binary(other, np.multiply)
+
+        def __truediv__(self, other: object) -> "_NoNoneCompositeArray":
+            return self._binary(other, np.divide)
+
+        def __gt__(self, other: object) -> "_NoNoneCompositeArray":
+            return self._binary(other, np.greater)
+
+        def __lt__(self, other: object) -> "_NoNoneCompositeArray":
+            return self._binary(other, np.less)
+
+        def __ne__(self, other: object) -> "_NoNoneCompositeArray":  # type: ignore[override]
+            return self._binary(other, np.not_equal)
+
+        def astype(self, dtype: np.dtype | type[np.generic]) -> "_NoNoneCompositeArray":
+            return _NoNoneCompositeArray(self._data.astype(dtype))
+
+        def reshape(self, shape: tuple[int, ...]) -> "_NoNoneCompositeArray":
+            return _NoNoneCompositeArray(self._data.reshape(shape))
+
+    class _NoNoneCompositeMlxModule:
+        def __init__(self) -> None:
+            self.float32 = np.float32
+            self.int32 = np.int32
+
+        def array(self, values: object, dtype: np.dtype | type[np.generic] | None = None) -> _NoNoneCompositeArray:
+            return _NoNoneCompositeArray(np.asarray(values, dtype=dtype))
+
+        def minimum(self, x: object, y: object) -> _NoNoneCompositeArray:
+            return _NoNoneCompositeArray(np.minimum(np.asarray(x), np.asarray(y)))
+
+        def maximum(self, x: object, y: object) -> _NoNoneCompositeArray:
+            return _NoNoneCompositeArray(np.maximum(np.asarray(x), np.asarray(y)))
+
+        def max(self, values: object) -> _NoNoneCompositeArray:
+            return _NoNoneCompositeArray(np.max(np.asarray(values)))
+
+        def min(self, values: object) -> _NoNoneCompositeArray:
+            return _NoNoneCompositeArray(np.min(np.asarray(values)))
+
+        def where(self, condition: object, x: object, y: object) -> _NoNoneCompositeArray:
+            return _NoNoneCompositeArray(np.where(np.asarray(condition), np.asarray(x), np.asarray(y)))
+
+        def full(
+            self,
+            shape: tuple[int, ...],
+            fill_value: object,
+            dtype: np.dtype | type[np.generic] = np.float32,
+        ) -> _NoNoneCompositeArray:
+            return _NoNoneCompositeArray(np.full(shape, fill_value, dtype=dtype))
+
+        def take(self, values: object, indices: object, axis: int | None = None) -> _NoNoneCompositeArray:
+            return _NoNoneCompositeArray(np.take(np.asarray(values), np.asarray(indices), axis=axis))
+
+    mx = _NoNoneCompositeMlxModule()
+    raster_kernel_module._mlx_array_type.cache_clear()
+    monkeypatch.setattr(raster_kernel_module, "_require_mlx", lambda: mx)
+
+    try:
+        actual_rgb, actual_alpha = raster_kernel_module._composite_mlx(
+            zpix=zpix,
+            atom_buf=atom_buf,
+            pconetot=pconetot,
+            l_opacity=l_opacity,
+            type_lookup=type_lookup,
+            colortype=colortype,
+            fog_color=fog_color,
+            fog_front=0.9,
+            fog_back=0.3,
+            zbuf_bg=-10000.0,
+        )
+    finally:
+        raster_kernel_module._mlx_array_type.cache_clear()
+
+    assert isinstance(actual_rgb, _NoNoneCompositeArray)
+    assert isinstance(actual_alpha, _NoNoneCompositeArray)
+    actual_rgb_np = np.asarray(actual_rgb, dtype=np.float32)
+    actual_alpha_np = np.asarray(actual_alpha, dtype=np.float32)
+    assert actual_rgb_np.shape == expected_rgb.shape
+    assert actual_alpha_np.shape == expected_alpha.shape
+    assert np.max(np.abs(actual_rgb_np - expected_rgb)) <= 1e-5
+    assert np.max(np.abs(actual_alpha_np - expected_alpha)) <= 1e-5
+
+
 def test_render_rejects_unknown_backend(tmp_path: Path) -> None:
     pdb_path = tmp_path / "mini.pdb"
     _write_minimal_pdb(pdb_path)
@@ -1323,6 +1531,107 @@ def test_rasterize_atoms_reuses_cached_sphere_axes_across_render_calls(
     assert fake_backend.calls[other_kernel] == 0
 
 
+def test_rasterize_atoms_tracks_shadow_bounds_for_visible_atoms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pdb_path = tmp_path / "mini.pdb"
+    _write_minimal_pdb(pdb_path)
+    params = _minimal_params(pdb_path)
+    atoms = load_pdb(pdb_path, params.rules)
+    program = render_module._program_from_params(params)
+    scene = render_pipeline_module.prepare_scene(program, atoms)
+    buffers = render_pipeline_module.BackendBuffers(
+        backend_name="numpy",
+        zpix=np.full((scene.layout.width, scene.layout.height), -10000.0, dtype=np.float32),
+        atom_buf=np.zeros((scene.layout.width, scene.layout.height), dtype=np.int32),
+        bio_buf=np.ones((scene.layout.width, scene.layout.height), dtype=np.int32),
+    )
+
+    monkeypatch.setattr(
+        render_pipeline_module,
+        "run_kernel",
+        lambda **kwargs: (kwargs["zpix"], kwargs["atom_buf"], kwargs["bio_buf"]),
+    )
+
+    render_pipeline_module._rasterize_atoms(scene, atoms, buffers, render_module._precompute_sphere)
+
+    assert buffers.shadow_bounds is not None
+    x0, x1, y0, y1 = buffers.shadow_bounds
+    assert 0 <= x0 < x1 <= scene.layout.width
+    assert 0 <= y0 < y1 <= scene.layout.height
+    assert (x0, x1) != (0, scene.layout.width)
+    assert (y0, y1) != (0, scene.layout.height)
+
+
+@pytest.mark.parametrize("backend_name", ["numpy", "cupy", "mlx"])
+def test_shadow_mask_crops_to_shadow_bounds_and_reembeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_name: str,
+) -> None:
+    pdb_path = tmp_path / "mini.pdb"
+    _write_minimal_pdb(pdb_path)
+    params = _minimal_params(pdb_path)
+    params.world.shadows = True
+    atoms = load_pdb(pdb_path, params.rules)
+    program = render_module._program_from_params(params)
+    scene = render_pipeline_module.prepare_scene(program, atoms)
+    width, height = scene.layout.width, scene.layout.height
+    shadow_bounds = (5, 14, 7, 19)
+
+    zpix_np = np.full((width, height), -10000.0, dtype=np.float32)
+    atom_np = np.zeros((width, height), dtype=np.int32)
+    atom_np[shadow_bounds[0] : shadow_bounds[1], shadow_bounds[2] : shadow_bounds[3]] = 1
+    bio_np = np.ones((width, height), dtype=np.int32)
+
+    fake_backend = _FakeBackendModule(mode=backend_name)
+    if backend_name == "numpy":
+        buffers = render_pipeline_module.BackendBuffers(
+            backend_name=backend_name,
+            zpix=zpix_np.copy(),
+            atom_buf=atom_np.copy(),
+            bio_buf=bio_np.copy(),
+            shadow_bounds=shadow_bounds,
+        )
+    else:
+        buffers = render_pipeline_module.BackendBuffers(
+            backend_name=backend_name,
+            zpix=_FakeGPUArray(zpix_np.copy()),
+            atom_buf=_FakeGPUArray(atom_np.copy()),
+            bio_buf=_FakeGPUArray(bio_np.copy()),
+            cupy_mod=fake_backend if backend_name == "cupy" else None,
+            mlx_mod=fake_backend if backend_name == "mlx" else None,
+            shadow_bounds=shadow_bounds,
+        )
+
+    crop_shape = (shadow_bounds[1] - shadow_bounds[0], shadow_bounds[3] - shadow_bounds[2])
+    calls = {"count": 0}
+
+    def fake_shadow_kernel(**kwargs):
+        calls["count"] += 1
+        assert np.asarray(kwargs["zpix"], dtype=np.float32).shape == crop_shape
+        assert np.asarray(kwargs["atom_buf"], dtype=np.int32).shape == crop_shape
+        shadow_crop = np.full(crop_shape, 0.25, dtype=np.float32)
+        if backend_name == "numpy":
+            return shadow_crop
+        return _FakeGPUArray(shadow_crop, dtype=np.float32)
+
+    monkeypatch.setattr(render_pipeline_module, "run_shadow_kernel", fake_shadow_kernel)
+
+    shadow = render_pipeline_module._shadow_mask(scene, buffers)
+    shadow_np = np.asarray(shadow, dtype=np.float32)
+
+    assert calls == {"count": 1}
+    assert shadow_np.shape == (width, height)
+    assert np.allclose(
+        shadow_np[shadow_bounds[0] : shadow_bounds[1], shadow_bounds[2] : shadow_bounds[3]],
+        0.25,
+    )
+    shadow_np[shadow_bounds[0] : shadow_bounds[1], shadow_bounds[2] : shadow_bounds[3]] = 1.0
+    assert np.allclose(shadow_np, 1.0)
+
+
 def test_raster_chunk_mlx_avoids_scalar_item_gates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1634,12 +1943,14 @@ def test_render_gpu_shadow_and_composite_fast_path_stays_backend_native(
     base_zpix[8:20, 9:21] = -4.0
 
     def make_buffers(name: str) -> render_pipeline_module.BackendBuffers:
+        shadow_bounds = (8, 20, 9, 21)
         if name == "numpy":
             return render_pipeline_module.BackendBuffers(
                 backend_name=name,
                 zpix=base_zpix.copy(),
                 atom_buf=base_atom_buf.copy(),
                 bio_buf=base_bio_buf.copy(),
+                shadow_bounds=shadow_bounds,
             )
         return render_pipeline_module.BackendBuffers(
             backend_name=name,
@@ -1648,6 +1959,7 @@ def test_render_gpu_shadow_and_composite_fast_path_stays_backend_native(
             bio_buf=_FakeGPUArray(base_bio_buf.copy()),
             cupy_mod=fake_backend if name == "cupy" else None,
             mlx_mod=fake_backend if name == "mlx" else None,
+            shadow_bounds=shadow_bounds,
         )
 
     calls = {"shadow": 0, "composite": 0}
@@ -1739,3 +2051,5 @@ def test_render_gpu_shadow_and_composite_fast_path_stays_backend_native(
     else:
         assert fake_backend.calls["eval"] == 1
         assert fake_backend.calls["asnumpy"] == 0
+        assert fake_backend.calls["clip"] == 2
+        assert fake_backend.calls["swapaxes"] == 2

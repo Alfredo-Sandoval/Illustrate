@@ -71,6 +71,7 @@ class BackendBuffers:
     bio_buf: Any
     cupy_mod: Any | None = None
     mlx_mod: Any | None = None
+    shadow_bounds: tuple[int, int, int, int] | None = None
 
 
 def _cached_backend_array(
@@ -159,6 +160,22 @@ def _build_rule_arrays(program: CommandProgram) -> tuple[np.ndarray, np.ndarray]
         colortype[idx, 2] = np.float32(rule.color[2])
         radtype[idx] = np.float32(rule.radius)
     return colortype, radtype
+
+
+def _merge_shadow_bounds(
+    current: tuple[int, int, int, int] | None,
+    *,
+    x0: int,
+    x1: int,
+    y0: int,
+    y1: int,
+) -> tuple[int, int, int, int] | None:
+    if x0 >= x1 or y0 >= y1:
+        return current
+    if current is None:
+        return (x0, x1, y0, y1)
+    cx0, cx1, cy0, cy1 = current
+    return (min(cx0, x0), max(cx1, x1), min(cy0, y0), max(cy1, y1))
 
 
 def _build_biomats(atoms: AtomTable) -> tuple[int, np.ndarray]:
@@ -341,6 +358,10 @@ def _rasterize_atoms(
             continue
 
         nv = len(sphere)
+        sx_min = float(np.min(sphere[:, 0]))
+        sx_max = float(np.max(sphere[:, 0]))
+        sy_min = float(np.min(sphere[:, 1]))
+        sy_max = float(np.max(sphere[:, 1]))
         sphere_key = ("sphere", id(sphere))
         sx = _backend_float_array(buffers, sphere[:, 0], cache_key=(sphere_key, 0))
         sy = _backend_float_array(buffers, sphere[:, 1], cache_key=(sphere_key, 1))
@@ -360,6 +381,19 @@ def _rasterize_atoms(
                 continue
 
             vis_idx = np.where(visible)[0]
+            cx_visible = cx_all[vis_idx]
+            cy_visible = cy_all[vis_idx]
+            x0 = max(0, min(layout.width, int(np.floor(float(np.min(cx_visible)) + half_ix + sx_min)) - 1))
+            x1 = max(0, min(layout.width, int(np.ceil(float(np.max(cx_visible)) + half_ix + sx_max))))
+            y0 = max(0, min(layout.height, int(np.floor(float(np.min(cy_visible)) + half_iy + sy_min)) - 1))
+            y1 = max(0, min(layout.height, int(np.ceil(float(np.max(cy_visible)) + half_iy + sy_max))))
+            buffers.shadow_bounds = _merge_shadow_bounds(
+                buffers.shadow_bounds,
+                x0=x0,
+                x1=x1,
+                y0=y0,
+                y1=y1,
+            )
             cx_vis = _backend_float_array(buffers, cx_all[vis_idx])
             cy_vis = _backend_float_array(buffers, cy_all[vis_idx])
             cz_vis = _backend_float_array(buffers, cz_all[vis_idx])
@@ -450,19 +484,55 @@ def _precompute_outline(scene: PreparedScene, atoms: AtomTable, buffers: Backend
 
 
 def _shadow_mask(scene: PreparedScene, buffers: BackendBuffers) -> Any:
+    width = scene.layout.width
+    height = scene.layout.height
     if scene.world.shadows:
-        return run_shadow_kernel(
+        bounds = buffers.shadow_bounds
+        if bounds is not None:
+            x0, x1, y0, y1 = bounds
+            if x0 >= x1 or y0 >= y1:
+                bounds = None
+        if bounds is None:
+            if buffers.cupy_mod is not None:
+                return buffers.cupy_mod.ones((width, height), dtype=buffers.cupy_mod.float32)
+            if buffers.mlx_mod is not None:
+                return buffers.mlx_mod.ones((width, height), dtype=buffers.mlx_mod.float32)
+            return np.ones((width, height), dtype=np.float32)
+
+        x0, x1, y0, y1 = bounds
+        if x0 == 0 and x1 == width and y0 == 0 and y1 == height:
+            return run_shadow_kernel(
+                backend=buffers.backend_name,
+                zpix=buffers.zpix,
+                atom_buf=buffers.atom_buf,
+                shadow_strength=float(scene.world.shadow_strength),
+                shadow_angle=float(scene.world.shadow_angle),
+                shadow_min_z=float(scene.world.shadow_min_z),
+                shadow_max_dark=float(scene.world.shadow_max_dark),
+            )
+
+        shadow_crop = run_shadow_kernel(
             backend=buffers.backend_name,
-            zpix=buffers.zpix,
-            atom_buf=buffers.atom_buf,
+            zpix=buffers.zpix[x0:x1, y0:y1],
+            atom_buf=buffers.atom_buf[x0:x1, y0:y1],
             shadow_strength=float(scene.world.shadow_strength),
             shadow_angle=float(scene.world.shadow_angle),
             shadow_min_z=float(scene.world.shadow_min_z),
             shadow_max_dark=float(scene.world.shadow_max_dark),
         )
+        if buffers.cupy_mod is not None:
+            full_shadow = buffers.cupy_mod.ones((width, height), dtype=buffers.cupy_mod.float32)
+            full_shadow[x0:x1, y0:y1] = shadow_crop
+            return full_shadow
+        if buffers.mlx_mod is not None:
+            mx = buffers.mlx_mod
+            full_shadow = mx.ones((width, height), dtype=mx.float32)
+            crop_delta = mx.ones((x1 - x0, y1 - y0), dtype=mx.float32) - shadow_crop
+            return full_shadow.at[x0:x1, y0:y1].subtract(crop_delta)
+        full_shadow = np.ones((width, height), dtype=np.float32)
+        full_shadow[x0:x1, y0:y1] = np.asarray(shadow_crop, dtype=np.float32)
+        return full_shadow
 
-    width = scene.layout.width
-    height = scene.layout.height
     if buffers.cupy_mod is not None:
         return buffers.cupy_mod.ones((width, height), dtype=buffers.cupy_mod.float32)
     if buffers.mlx_mod is not None:
@@ -516,9 +586,18 @@ def _render_precomputed_outline(
         rgb_linear = buffers.cupy_mod.asnumpy(rgb_linear)
         alpha_linear = buffers.cupy_mod.asnumpy(alpha_linear)
     elif buffers.mlx_mod is not None:
-        buffers.mlx_mod.eval(rgb_linear, alpha_linear)
-        rgb_linear = np.array(rgb_linear, dtype=np.float32)
-        alpha_linear = np.array(alpha_linear, dtype=np.float32)
+        mx = buffers.mlx_mod
+        scale = mx.array(np.float32(255.0), dtype=mx.float32)
+        zero = mx.array(np.float32(0.0), dtype=mx.float32)
+        hi = mx.array(np.float32(255.0), dtype=mx.float32)
+        rgb_u8 = mx.clip(rgb_linear * scale, zero, hi).astype(mx.uint8)
+        alpha_u8 = mx.clip(alpha_linear * scale, zero, hi).astype(mx.uint8)
+        rgb_u8 = mx.swapaxes(rgb_u8, 0, 1)
+        alpha_u8 = mx.swapaxes(alpha_u8, 0, 1)
+        mx.eval(rgb_u8, alpha_u8)
+        rgb = np.array(rgb_u8, dtype=np.uint8)
+        opacity = np.array(alpha_u8, dtype=np.uint8)
+        return RenderResult(rgb=rgb, opacity=opacity, width=scene.layout.width, height=scene.layout.height)
     else:
         rgb_linear = np.asarray(rgb_linear, dtype=np.float32)
         alpha_linear = np.asarray(alpha_linear, dtype=np.float32)

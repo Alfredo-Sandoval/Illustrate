@@ -421,7 +421,7 @@ def _shadow_cone_mlx(
         )
         rzdiff = shifted_z - zpix_plane
         shadow_mask: Any = has_atom_plane & (rzdiff > min_z) & ((radii * angle) < (rzdiff + min_z))
-        count = count + mx.sum(shadow_mask.astype(mx.int32), axis=0)
+        count = count + mx.sum(shadow_mask, axis=0).astype(mx.int32)
 
     pconetot = np.float32(1.0) - count.astype(mx.float32) * strength
     pconetot = mx.maximum(pconetot, max_dark)
@@ -1146,28 +1146,38 @@ def _composite_mlx(
     type_lookup_mx = _as_mlx_array(type_lookup, dtype=mx.int32)
     color_lut = _as_mlx_array(colortype, dtype=mx.float32)
     fog_color_mx = _as_mlx_array(fog_color, dtype=mx.float32)
+    zero_f = mx.array(np.float32(0.0), dtype=mx.float32)
+    one_f = mx.array(np.float32(1.0), dtype=mx.float32)
+    zbuf_bg_f = mx.array(np.float32(zbuf_bg), dtype=mx.float32)
+    zfar_f = mx.array(np.float32(100000.0), dtype=mx.float32)
+    fog_front_f = mx.array(np.float32(fog_front), dtype=mx.float32)
+    pfogdiff_f = mx.array(np.float32(fog_front - fog_back), dtype=mx.float32)
 
-    zpix_max = mx.minimum(mx.max(zpix_mx), np.float32(0.0))
-    mol_mask: Any = zpix_mx != np.float32(zbuf_bg)
-    zpix_min = mx.min(mx.where(mol_mask, zpix_mx, np.float32(100000.0)))
-    zpix_clamped = mx.minimum(zpix_mx, np.float32(0.0))
+    zpix_max = mx.minimum(mx.max(zpix_mx), zero_f)
+    mol_mask: Any = zpix_mx != zbuf_bg_f
+    zpix_min = mx.min(mx.where(mol_mask, zpix_mx, zfar_f))
+    zpix_clamped = mx.minimum(zpix_mx, zero_f)
     zpix_spread = zpix_max - zpix_min
-    pfogdiff = np.float32(fog_front - fog_back)
 
-    safe_spread = mx.where(zpix_spread != np.float32(0.0), zpix_spread, np.float32(1.0))
-    pfh_raw = np.float32(fog_front) - (zpix_max - zpix_clamped) / safe_spread * pfogdiff
+    safe_spread = mx.where(zpix_spread != zero_f, zpix_spread, one_f)
+    pfh_raw = fog_front_f - (zpix_max - zpix_clamped) / safe_spread * pfogdiff_f
     pfh = mx.where(
-        zpix_spread != np.float32(0.0),
+        zpix_spread != zero_f,
         pfh_raw,
         mx.full(zpix_mx.shape, np.float32(fog_front), dtype=mx.float32),
     )
-    pfh = mx.where(zpix_clamped < zpix_min, np.float32(1.0), pfh).astype(mx.float32)
+    pfh = mx.where(zpix_clamped < zpix_min, one_f, pfh).astype(mx.float32)
 
     atom_idx = atom_mx.astype(mx.int32)
     pixel_types = mx.take(type_lookup_mx, atom_idx, axis=0).astype(mx.int32)
     atom_colors = mx.take(color_lut, pixel_types, axis=0)
-    rcolor = pfh[:, :, None] * (cone_mx[:, :, None] * atom_colors) + (np.float32(1.0) - pfh[:, :, None]) * fog_color_mx[None, None, :]
-    rgb = (np.float32(1.0) - l_opacity_mx[:, :, None]) * rcolor
+    height, width = zpix_mx.shape
+    pfh_3 = pfh.reshape((height, width, 1))
+    cone_3 = cone_mx.reshape((height, width, 1))
+    l_opacity_3 = l_opacity_mx.astype(mx.float32).reshape((height, width, 1))
+    fog_color_3 = fog_color_mx.reshape((1, 1, 3))
+    rcolor = pfh_3 * (cone_3 * atom_colors) + (one_f - pfh_3) * fog_color_3
+    rgb = (one_f - l_opacity_3) * rcolor
     alpha = mx.maximum((pixel_types != 0).astype(mx.float32), l_opacity_mx.astype(mx.float32))
     return rgb, alpha
 
