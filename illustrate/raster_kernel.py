@@ -1113,18 +1113,18 @@ def _composite_cupy(
 
     zpix_max = cp.minimum(cp.max(zpix_gpu), cp.float32(0.0))
     mol_mask = zpix_gpu != cp.float32(zbuf_bg)
-    if bool(cp.any(mol_mask)):
-        zpix_min = cp.min(zpix_gpu[mol_mask])
-    else:
-        zpix_min = cp.float32(100000.0)
+    zpix_min = cp.min(cp.where(mol_mask, zpix_gpu, cp.float32(100000.0)))
     zpix_clamped = cp.minimum(zpix_gpu, cp.float32(0.0))
     zpix_spread = zpix_max - zpix_min
     pfogdiff = cp.float32(fog_front - fog_back)
 
-    if float(zpix_spread.item()) != 0.0:
-        pfh = cp.float32(fog_front) - (zpix_max - zpix_clamped) / zpix_spread * pfogdiff
-    else:
-        pfh = cp.full(zpix_gpu.shape, cp.float32(fog_front), dtype=cp.float32)
+    safe_spread = cp.where(zpix_spread != cp.float32(0.0), zpix_spread, cp.float32(1.0))
+    pfh_raw = cp.float32(fog_front) - (zpix_max - zpix_clamped) / safe_spread * pfogdiff
+    pfh = cp.where(
+        zpix_spread != cp.float32(0.0),
+        pfh_raw,
+        cp.full(zpix_gpu.shape, cp.float32(fog_front), dtype=cp.float32),
+    )
     pfh = cp.where(zpix_clamped < zpix_min, cp.float32(1.0), pfh).astype(cp.float32)
 
     pixel_types = type_lookup_gpu[atom_gpu]

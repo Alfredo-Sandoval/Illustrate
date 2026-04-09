@@ -961,6 +961,82 @@ def test_rasterize_atoms_uploads_backend_arrays_once_per_visible_batch(
 
 
 @pytest.mark.parametrize("backend_name", ["cupy", "mlx"])
+def test_gpu_atom_lookup_uploads_reuse_cached_device_arrays_across_render_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_name: str,
+) -> None:
+    pdb_path = tmp_path / "mini.pdb"
+    _write_minimal_pdb(pdb_path)
+    params = _minimal_params(pdb_path)
+    params.outlines.enabled = True
+    params.outlines.kernel = 3
+    atoms = load_pdb(pdb_path, params.rules)
+    program = render_module._program_from_params(params)
+    scene = render_pipeline_module.prepare_scene(program, atoms)
+    fake_backend = _FakeBackendModule(mode=backend_name)
+    width, height = scene.layout.width, scene.layout.height
+
+    render_pipeline_module._BACKEND_ARRAY_CACHE.clear()
+
+    def make_buffers() -> render_pipeline_module.BackendBuffers:
+        return render_pipeline_module.BackendBuffers(
+            backend_name=backend_name,
+            zpix=_FakeGPUArray(np.zeros((width, height), dtype=np.float32)),
+            atom_buf=_FakeGPUArray(np.zeros((width, height), dtype=np.int32)),
+            bio_buf=_FakeGPUArray(np.ones((width, height), dtype=np.int32)),
+            cupy_mod=fake_backend if backend_name == "cupy" else None,
+            mlx_mod=fake_backend if backend_name == "mlx" else None,
+        )
+
+    seen_outline: list[tuple[object, object]] = []
+    seen_type_lookup: list[object] = []
+
+    def fake_outline34(**kwargs):
+        seen_outline.append((kwargs["su_lookup"], kwargs["res_lookup"]))
+        return _FakeGPUArray(np.zeros((width, height), dtype=np.float32), dtype=np.float32)
+
+    def fake_composite(**kwargs):
+        seen_type_lookup.append(kwargs["type_lookup"])
+        return (
+            _FakeGPUArray(np.zeros((width, height, 3), dtype=np.float32), dtype=np.float32),
+            _FakeGPUArray(np.zeros((width, height), dtype=np.float32), dtype=np.float32),
+        )
+
+    monkeypatch.setattr(render_pipeline_module, "run_outline34_kernel", fake_outline34)
+    monkeypatch.setattr(render_pipeline_module, "run_composite_kernel", fake_composite)
+    monkeypatch.setattr(render_pipeline_module, "_outline_input", lambda zpix, _buffers: zpix)
+
+    buffers_first = make_buffers()
+    outline_first = render_pipeline_module._precompute_outline(scene, atoms, buffers_first)
+    result_first = render_pipeline_module._render_precomputed_outline(
+        scene,
+        atoms,
+        buffers_first,
+        _FakeGPUArray(np.ones((width, height), dtype=np.float32), dtype=np.float32),
+        outline_first,
+    )
+
+    buffers_second = make_buffers()
+    outline_second = render_pipeline_module._precompute_outline(scene, atoms, buffers_second)
+    result_second = render_pipeline_module._render_precomputed_outline(
+        scene,
+        atoms,
+        buffers_second,
+        _FakeGPUArray(np.ones((width, height), dtype=np.float32), dtype=np.float32),
+        outline_second,
+    )
+
+    assert result_first is not None
+    assert result_second is not None
+    assert len(seen_outline) == 2
+    assert len(seen_type_lookup) == 2
+    assert seen_outline[0][0] is seen_outline[1][0]
+    assert seen_outline[0][1] is seen_outline[1][1]
+    assert seen_type_lookup[0] is seen_type_lookup[1]
+
+
+@pytest.mark.parametrize("backend_name", ["cupy", "mlx"])
 def test_render_gpu_shadow_and_composite_fast_path_stays_backend_native(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

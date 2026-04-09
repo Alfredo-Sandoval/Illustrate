@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+import weakref
 
 import numpy as np
 
@@ -22,6 +24,11 @@ MAX_RULE_TYPES = 1000
 RULE_TABLE_SIZE = MAX_RULE_TYPES + 1
 MAX_IMAGE_DIMENSION = 3000
 _CHUNK_ATOMS = 512
+_BACKEND_ARRAY_CACHE_LIMIT = 32
+
+_BackendArrayCacheKey = tuple[str, int, str, tuple[int, ...]]
+_BackendArrayCacheValue = tuple[weakref.ReferenceType[np.ndarray], Any]
+_BACKEND_ARRAY_CACHE: OrderedDict[_BackendArrayCacheKey, _BackendArrayCacheValue] = OrderedDict()
 
 
 @dataclass(slots=True)
@@ -64,6 +71,69 @@ class BackendBuffers:
     bio_buf: Any
     cupy_mod: Any | None = None
     mlx_mod: Any | None = None
+
+
+def _cached_backend_array(
+    buffers: BackendBuffers,
+    values: np.ndarray,
+    *,
+    cpu_dtype: np.dtype[Any] | type[np.generic],
+    backend_dtype_attr: str,
+    cache: bool = False,
+) -> Any:
+    source = np.asarray(values, dtype=cpu_dtype)
+    if buffers.cupy_mod is not None:
+        backend_mod = buffers.cupy_mod
+        converter_name = "asarray"
+    elif buffers.mlx_mod is not None:
+        backend_mod = buffers.mlx_mod
+        converter_name = "array"
+    else:
+        return source
+
+    backend_dtype = getattr(backend_mod, backend_dtype_attr)
+    if not cache:
+        return getattr(backend_mod, converter_name)(source, dtype=backend_dtype)
+
+    key: _BackendArrayCacheKey = (
+        buffers.backend_name,
+        id(source),
+        source.dtype.str,
+        tuple(source.shape),
+    )
+    cached = _BACKEND_ARRAY_CACHE.get(key)
+    if cached is not None:
+        source_ref, device_array = cached
+        if source_ref() is source:
+            _BACKEND_ARRAY_CACHE.move_to_end(key)
+            return device_array
+        del _BACKEND_ARRAY_CACHE[key]
+
+    device_array = getattr(backend_mod, converter_name)(source, dtype=backend_dtype)
+    _BACKEND_ARRAY_CACHE[key] = (weakref.ref(source), device_array)
+    while len(_BACKEND_ARRAY_CACHE) > _BACKEND_ARRAY_CACHE_LIMIT:
+        _BACKEND_ARRAY_CACHE.popitem(last=False)
+    return device_array
+
+
+def _backend_float_array(buffers: BackendBuffers, values: np.ndarray, *, cache: bool = False) -> Any:
+    return _cached_backend_array(
+        buffers,
+        values,
+        cpu_dtype=np.float32,
+        backend_dtype_attr="float32",
+        cache=cache,
+    )
+
+
+def _backend_int_array(buffers: BackendBuffers, values: np.ndarray, *, cache: bool = False) -> Any:
+    return _cached_backend_array(
+        buffers,
+        values,
+        cpu_dtype=np.int32,
+        backend_dtype_attr="int32",
+        cache=cache,
+    )
 
 
 def _build_rule_arrays(program: CommandProgram) -> tuple[np.ndarray, np.ndarray]:
@@ -249,20 +319,6 @@ def _rasterize_atoms(
     fix = float(layout.width)
     fiy = float(layout.height)
 
-    def backend_float_array(values: np.ndarray) -> Any:
-        if buffers.cupy_mod is not None:
-            return buffers.cupy_mod.asarray(values, dtype=buffers.cupy_mod.float32)
-        if buffers.mlx_mod is not None:
-            return buffers.mlx_mod.array(values, dtype=buffers.mlx_mod.float32)
-        return np.asarray(values, dtype=np.float32)
-
-    def backend_int_array(values: np.ndarray) -> Any:
-        if buffers.cupy_mod is not None:
-            return buffers.cupy_mod.asarray(values, dtype=buffers.cupy_mod.int32)
-        if buffers.mlx_mod is not None:
-            return buffers.mlx_mod.array(values, dtype=buffers.mlx_mod.int32)
-        return np.asarray(values, dtype=np.int32)
-
     for irad in range(1, scene.ndes + 1):
         sphere = sphere_lookup(float(scene.radtype[irad]))
         if len(sphere) == 0:
@@ -273,9 +329,9 @@ def _rasterize_atoms(
             continue
 
         nv = len(sphere)
-        sx = backend_float_array(sphere[:, 0])
-        sy = backend_float_array(sphere[:, 1])
-        sz = backend_float_array(sphere[:, 2])
+        sx = _backend_float_array(buffers, sphere[:, 0])
+        sy = _backend_float_array(buffers, sphere[:, 1])
+        sz = _backend_float_array(buffers, sphere[:, 2])
 
         for ibio in range(1, layout.nbiomat + 1):
             bm = layout.biomats[ibio]
@@ -291,10 +347,10 @@ def _rasterize_atoms(
                 continue
 
             vis_idx = np.where(visible)[0]
-            cx_vis = backend_float_array(cx_all[vis_idx])
-            cy_vis = backend_float_array(cy_all[vis_idx])
-            cz_vis = backend_float_array(cz_all[vis_idx])
-            ia_vis = backend_int_array(matching[vis_idx] + 1)
+            cx_vis = _backend_float_array(buffers, cx_all[vis_idx])
+            cy_vis = _backend_float_array(buffers, cy_all[vis_idx])
+            cz_vis = _backend_float_array(buffers, cz_all[vis_idx])
+            ia_vis = _backend_int_array(buffers, matching[vis_idx] + 1)
 
             for chunk_start in range(0, len(vis_idx), _CHUNK_ATOMS):
                 chunk_end = min(chunk_start + _CHUNK_ATOMS, len(vis_idx))
@@ -336,14 +392,17 @@ def _precompute_outline(scene: PreparedScene, atoms: AtomTable, buffers: Backend
     if not outlines.enabled:
         return None
 
+    su_lookup = _backend_int_array(buffers, atoms.su, cache=True)
+    res_lookup = _backend_int_array(buffers, atoms.res, cache=True)
+
     if outlines.kernel in (3, 4):
         return run_outline34_kernel(
             backend=buffers.backend_name,
             zpix=_outline_input(buffers.zpix, buffers),
             atom_buf=buffers.atom_buf,
             bio_buf=buffers.bio_buf,
-            su_lookup=atoms.su,
-            res_lookup=atoms.res,
+            su_lookup=su_lookup,
+            res_lookup=res_lookup,
             residue_diff=float(outlines.residue_diff),
             residue_low=float(outlines.residue_low),
             residue_high=float(outlines.residue_high),
@@ -362,8 +421,8 @@ def _precompute_outline(scene: PreparedScene, atoms: AtomTable, buffers: Backend
             zpix=_outline_input(buffers.zpix, buffers),
             atom_buf=buffers.atom_buf,
             bio_buf=buffers.bio_buf,
-            su_lookup=atoms.su,
-            res_lookup=atoms.res,
+            su_lookup=su_lookup,
+            res_lookup=res_lookup,
             residue_diff=float(outlines.residue_diff),
             residue_low=float(outlines.residue_low),
             residue_high=float(outlines.residue_high),
@@ -423,15 +482,19 @@ def _render_precomputed_outline(
         else:
             return None
 
+    type_lookup = _backend_int_array(buffers, atoms.type_idx, cache=True)
+    color_lut = _backend_float_array(buffers, scene.colortype)
+    fog_color = _backend_float_array(buffers, scene.fog_color.astype(np.float32, copy=False))
+
     rgb_linear, alpha_linear = run_composite_kernel(
         backend=buffers.backend_name,
         zpix=buffers.zpix,
         atom_buf=buffers.atom_buf,
         pconetot=pconetot,
         l_opacity=outline_opacity,
-        type_lookup=atoms.type_idx,
-        colortype=scene.colortype,
-        fog_color=scene.fog_color.astype(np.float32),
+        type_lookup=type_lookup,
+        colortype=color_lut,
+        fog_color=fog_color,
         fog_front=float(scene.fog_front),
         fog_back=float(scene.fog_back),
         zbuf_bg=float(ZBUF_BG),
