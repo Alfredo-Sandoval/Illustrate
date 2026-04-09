@@ -16,7 +16,7 @@ from PIL import Image as PILImage
 from illustrate import OutlineParams, RenderParams, SelectionRule, Transform, WorldParams, render_from_atoms
 from illustrate.pdb import load_pdb as _load_pdb
 
-from illustrate_web.api.deps import RateLimitExceeded, enforce_rate_limit, get_upload_path
+from illustrate_web.api.deps import RateLimitExceeded, enforce_rate_limit, get_upload_path, rate_limit_client_host
 from illustrate_web.api.models import RenderRequest
 
 router = APIRouter(prefix="/api")
@@ -121,7 +121,7 @@ def _normalize_format(value: str) -> str:
 @router.post("/render")
 async def render_endpoint(payload: RenderRequest, request: Request) -> StreamingResponse:
     try:
-        enforce_rate_limit("render", client_host=request.client.host if request.client is not None else None)
+        enforce_rate_limit("render", client_host=rate_limit_client_host(request))
     except RateLimitExceeded as exc:
         raise HTTPException(
             status_code=429,

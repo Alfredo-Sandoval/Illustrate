@@ -16,7 +16,7 @@ from urllib import parse, request
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from illustrate_web.api.deps import RateLimitExceeded, enforce_rate_limit
+from illustrate_web.api.deps import RateLimitExceeded, enforce_rate_limit, rate_limit_client_host
 
 router = APIRouter(prefix="/api")
 _EM_TAG_RE = re.compile(r"</?em>", re.IGNORECASE)
@@ -168,7 +168,7 @@ async def suggest_pdb(
     q: str = Query(min_length=2, max_length=64),
 ) -> list[dict[str, str]]:
     try:
-        enforce_rate_limit("suggest", client_host=request.client.host if request.client is not None else None)
+        enforce_rate_limit("suggest", client_host=rate_limit_client_host(request))
     except RateLimitExceeded as exc:
         raise HTTPException(
             status_code=429,

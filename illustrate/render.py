@@ -27,8 +27,6 @@ from illustrate.types import (
     WorldParams,
 )
 
-PI = 3.141592
-ZBUF_BG = -10000.0
 _SPHERE_CACHE_RESOLUTION = 1000.0
 _SPHERE_CACHE_MAX_ENTRIES = 256
 _SPHERE_CACHE: OrderedDict[int, np.ndarray] = OrderedDict()
@@ -57,41 +55,6 @@ def _resolve_render_backend(backend: str | None) -> str:
             return candidate
 
     raise RuntimeError("No available render backend found")
-
-
-def _build_rule_arrays(program: CommandProgram) -> tuple[np.ndarray, np.ndarray]:
-    colortype = np.full((1001, 3), 0.5, dtype=np.float32)
-    radtype = np.zeros(1001, dtype=np.float32)
-    for idx, rule in enumerate(program.selection_rules, start=1):
-        if idx >= 1001:
-            break
-        colortype[idx, 0] = np.float32(rule.color[0])
-        colortype[idx, 1] = np.float32(rule.color[1])
-        colortype[idx, 2] = np.float32(rule.color[2])
-        radtype[idx] = np.float32(rule.radius)
-    return colortype, radtype
-
-
-def _shifted_array(arr: np.ndarray, di: int, dj: int, fill_value: float | int = 0) -> np.ndarray:
-    """Return array where result[x,y] = arr[x+di, y+dj] with out-of-bounds fill."""
-    result = np.full_like(arr, fill_value)
-    h, w = arr.shape[:2]
-
-    sr0, sr1 = max(0, di), min(h, h + di)
-    sc0, sc1 = max(0, dj), min(w, w + dj)
-    dr0, dr1 = max(0, -di), min(h, h - di)
-    dc0, dc1 = max(0, -dj), min(w, w - dj)
-
-    if sr1 > sr0 and sc1 > sc0:
-        result[dr0:dr1, dc0:dc1] = arr[sr0:sr1, sc0:sc1]
-    return result
-
-
-def _padded_shift_view(padded: np.ndarray, di: int, dj: int, h: int, w: int, pad: int) -> np.ndarray:
-    """Return a shifted view from a pre-padded array without allocating full output arrays."""
-    i0 = pad + di
-    j0 = pad + dj
-    return padded[i0 : i0 + h, j0 : j0 + w]
 
 
 def _precompute_sphere(scaled_radius: float) -> np.ndarray:
@@ -133,11 +96,6 @@ def _precompute_sphere(scaled_radius: float) -> np.ndarray:
         while len(_SPHERE_CACHE) > _SPHERE_CACHE_MAX_ENTRIES:
             _SPHERE_CACHE.popitem(last=False)
     return sphere
-
-
-def _to_u8(arr: np.ndarray) -> np.ndarray:
-    out = np.clip(arr.astype(np.int32), 0, 255)
-    return out.astype(np.uint8)
 
 
 def _render_program(program: CommandProgram, atoms: AtomTable, *, backend: str = "numpy") -> RenderResult:

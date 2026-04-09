@@ -20,6 +20,8 @@ gui = [
 ]
 web = [
   "fastapi",
+  "python-multipart",
+  "uvicorn",
 ]
 notebook = [
   "ipywidgets",

@@ -86,6 +86,32 @@ def test_pdb_suggest_endpoint_rejects_short_query() -> None:
     assert response.status_code == 422
 
 
+def test_suggest_rate_limit_ignores_forwarded_header_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ILLUSTRATE_API_TRUST_PROXY_HEADERS", raising=False)
+    monkeypatch.setenv("ILLUSTRATE_API_SUGGEST_RATE_LIMIT", "1")
+    monkeypatch.setenv("ILLUSTRATE_API_SUGGEST_RATE_WINDOW_SECONDS", "60")
+    monkeypatch.setattr(suggest_route, "_suggest_pdb", lambda _query: [])
+
+    first = client.get("/api/pdb-suggest", params={"q": "2hhb"}, headers={"X-Forwarded-For": "1.1.1.1"})
+    second = client.get("/api/pdb-suggest", params={"q": "2hhb"}, headers={"X-Forwarded-For": "2.2.2.2"})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+
+
+def test_suggest_rate_limit_uses_forwarded_header_when_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ILLUSTRATE_API_TRUST_PROXY_HEADERS", "1")
+    monkeypatch.setenv("ILLUSTRATE_API_SUGGEST_RATE_LIMIT", "1")
+    monkeypatch.setenv("ILLUSTRATE_API_SUGGEST_RATE_WINDOW_SECONDS", "60")
+    monkeypatch.setattr(suggest_route, "_suggest_pdb", lambda _query: [])
+
+    first = client.get("/api/pdb-suggest", params={"q": "2hhb"}, headers={"X-Forwarded-For": "1.1.1.1"})
+    second = client.get("/api/pdb-suggest", params={"q": "2hhb"}, headers={"X-Forwarded-For": "2.2.2.2"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
 def test_upload_then_render_invalid_output_format_returns_400() -> None:
     pdb_id = _upload_minimal_pdb()
     try:

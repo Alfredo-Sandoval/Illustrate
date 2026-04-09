@@ -5,7 +5,7 @@ The backend is a FastAPI app in `illustrate_web/api/`.
 ## Start the server
 
 ```bash
-pip install -e ".[web]" uvicorn
+pip install -e ".[web]"
 uvicorn illustrate_web.api.main:app --reload
 ```
 
@@ -18,6 +18,7 @@ Deployment note:
 - The API is designed for local or otherwise trusted network use.
 - It does not implement authentication.
 - Lightweight per-client rate limits now protect the expensive upload/fetch/render/suggest endpoints.
+- If you run behind a trusted reverse proxy, set `ILLUSTRATE_API_TRUST_PROXY_HEADERS=1` so rate limiting keys off forwarded client IPs.
 
 FastAPI docs endpoints (default):
 
@@ -169,6 +170,8 @@ Defaults:
 ## Runtime configuration
 
 - `ILLUSTRATE_UPLOAD_TTL_SECONDS`: upload retention window in seconds. Default: `86400`.
+- `ILLUSTRATE_API_UPLOAD_MAX_BYTES`: hard upload size cap in bytes. Default: `16777216` (`16 MiB`).
+- `ILLUSTRATE_API_TRUST_PROXY_HEADERS`: when set to `1`/`true`, rate limiting uses `X-Forwarded-For` / `Forwarded` before the socket peer.
 - `ILLUSTRATE_RCSB_FETCH_TIMEOUT_SECONDS`: timeout for direct PDB fetches. Default: `30`.
 - `ILLUSTRATE_RCSB_SUGGEST_TIMEOUT_SECONDS`: timeout for RCSB suggest/search/title lookups. Default: `7`.
 - `ILLUSTRATE_API_RENDER_RATE_LIMIT` and `ILLUSTRATE_API_RENDER_RATE_WINDOW_SECONDS`: per-client render throttle. Defaults: `30` requests per `60` seconds.

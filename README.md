@@ -40,7 +40,7 @@ A full desktop GUI built on PySide6. Drag to rotate, scroll to zoom, tweak color
 - Load `.pdb` files from disk or fetch directly by RCSB ID
 - 8 built-in style presets with live preview
 - Fine-grained control over selection rules, lighting, and outlines
-- One-click PNG export at any resolution
+- One-click PNG export up to `3000 x 3000`
 
 ### Install and launch
 

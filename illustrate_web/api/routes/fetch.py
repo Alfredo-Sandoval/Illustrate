@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from illustrate.fetch import fetch_pdb
 
-from illustrate_web.api.deps import RateLimitExceeded, enforce_rate_limit, register_upload
+from illustrate_web.api.deps import RateLimitExceeded, enforce_rate_limit, rate_limit_client_host, register_upload
 from illustrate_web.api.models import UploadResponse
 
 router = APIRouter(prefix="/api")
@@ -20,7 +20,7 @@ class FetchRequest(BaseModel):
 @router.post("/fetch-pdb", response_model=UploadResponse)
 async def fetch_pdb_route(body: FetchRequest, request: Request) -> UploadResponse:
     try:
-        enforce_rate_limit("fetch", client_host=request.client.host if request.client is not None else None)
+        enforce_rate_limit("fetch", client_host=rate_limit_client_host(request))
     except RateLimitExceeded as exc:
         raise HTTPException(
             status_code=429,

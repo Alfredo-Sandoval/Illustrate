@@ -9,13 +9,15 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
-from fastapi import UploadFile
+from fastapi import Request, UploadFile
 
 _UPLOAD_ROOT = Path(tempfile.gettempdir()) / "illustrate_uploads"
 _UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 _UPLOAD_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_FORWARDED_FOR_RE = re.compile(r"for=(?P<value>[^;,]+)", re.IGNORECASE)
 _UPLOAD_READ_CHUNK_SIZE = 1024 * 1024
 _RATE_LIMIT_LOCK = threading.Lock()
 _RATE_LIMIT_STATE: dict[tuple[str, str], deque[float]] = {}
@@ -51,6 +53,18 @@ def _env_int(name: str, default: int) -> int:
     if value < 0:
         raise ValueError(f"{name} must be >= 0")
     return value
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean-like value")
 
 
 def upload_ttl_seconds() -> float:
@@ -89,6 +103,54 @@ def _rate_limit_config(scope: str) -> tuple[int, float]:
     limit = _env_int(f"ILLUSTRATE_API_{scope.upper()}_RATE_LIMIT", default_limit)
     window = _env_float(f"ILLUSTRATE_API_{scope.upper()}_RATE_WINDOW_SECONDS", default_window)
     return limit, window
+
+
+def trust_proxy_headers() -> bool:
+    return _env_bool("ILLUSTRATE_API_TRUST_PROXY_HEADERS", False)
+
+
+def _normalize_forwarded_client(value: str) -> str:
+    token = value.strip().strip('"')
+    if token.startswith("["):
+        closing = token.find("]")
+        if closing != -1:
+            return token[1:closing]
+    if token.count(":") == 1:
+        host, _sep, port = token.partition(":")
+        if port.isdigit():
+            return host
+    return token
+
+
+def _proxy_forwarded_client(headers: Mapping[str, str]) -> str | None:
+    forwarded_for = headers.get("x-forwarded-for", "")
+    if forwarded_for.strip() != "":
+        candidate = forwarded_for.split(",", 1)[0].strip()
+        if candidate != "":
+            return _normalize_forwarded_client(candidate)
+
+    forwarded = headers.get("forwarded", "")
+    if forwarded.strip() == "":
+        return None
+    match = _FORWARDED_FOR_RE.search(forwarded)
+    if match is None:
+        return None
+    candidate = match.group("value").strip()
+    if candidate == "":
+        return None
+    return _normalize_forwarded_client(candidate)
+
+
+def rate_limit_client_host(request: Request | None) -> str | None:
+    if request is None:
+        return None
+    if trust_proxy_headers():
+        proxy_client = _proxy_forwarded_client(request.headers)
+        if proxy_client is not None:
+            return proxy_client
+    if request.client is None:
+        return None
+    return request.client.host
 
 
 def enforce_rate_limit(scope: str, *, client_host: str | None) -> None:
