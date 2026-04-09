@@ -69,6 +69,51 @@ def _require_mlx() -> Any:
     return _require_optional_module("mlx.core", "MLX backend requested but MLX is unavailable")
 
 
+@lru_cache(maxsize=1)
+def _mlx_array_type() -> type[Any]:
+    mx = _require_mlx()
+    return type(mx.array(np.zeros((0,), dtype=np.float32)))
+
+
+def _as_mlx_array(value: Any, *, dtype: Any | None = None) -> Any:
+    mx = _require_mlx()
+    array_type = _mlx_array_type()
+    if isinstance(value, array_type):
+        if dtype is not None and getattr(value, "dtype", None) != dtype:
+            return value.astype(dtype)
+        return value
+    if dtype is not None:
+        return mx.array(value, dtype=dtype)
+    return mx.array(value)
+
+
+@lru_cache(maxsize=8)
+def _shadow_offset_chunks(chunk_size: int) -> tuple[tuple[tuple[int, int, float], ...], ...]:
+    return tuple(
+        tuple(_SHADOW_OFFSETS[start : start + chunk_size])
+        for start in range(0, len(_SHADOW_OFFSETS), chunk_size)
+    )
+
+
+@lru_cache(maxsize=1)
+def _mlx_shadow_chunk_radii() -> tuple[Any, ...]:
+    mx = _require_mlx()
+    return tuple(
+        _as_mlx_array(np.array([radius for _di, _dj, radius in chunk], dtype=np.float32), dtype=mx.float32)[:, None, None]
+        for chunk in _shadow_offset_chunks(_MLX_SHADOW_CHUNK)
+    )
+
+
+@lru_cache(maxsize=2)
+def _mlx_outline12_lap_weights(kernel: int) -> Any:
+    mx = _require_mlx()
+    if kernel == 1:
+        return _as_mlx_array(_KERNEL1_LAP_WEIGHTS, dtype=mx.float32)
+    if kernel == 2:
+        return _as_mlx_array(_KERNEL2_LAP_WEIGHTS, dtype=mx.float32)
+    raise ValueError(f"outline12 kernel expects 1 or 2, got {kernel}")
+
+
 def _raster_chunk_numpy(
     *,
     sx: np.ndarray,
@@ -188,17 +233,17 @@ def _raster_chunk_mlx(
 
     del fix, fiy
 
-    zpix_mx = mx.array(zpix)
-    atom_buf_mx = mx.array(atom_buf)
-    bio_buf_mx = mx.array(bio_buf)
+    zpix_mx = _as_mlx_array(zpix, dtype=mx.float32)
+    atom_buf_mx = _as_mlx_array(atom_buf, dtype=mx.int32)
+    bio_buf_mx = _as_mlx_array(bio_buf, dtype=mx.int32)
 
-    sx_mx = mx.array(sx)
-    sy_mx = mx.array(sy)
-    sz_mx = mx.array(sz)
-    cx_mx = mx.array(c_cx)
-    cy_mx = mx.array(c_cy)
-    cz_mx = mx.array(c_cz)
-    ia_mx = mx.array(c_ia)
+    sx_mx = _as_mlx_array(sx, dtype=mx.float32)
+    sy_mx = _as_mlx_array(sy, dtype=mx.float32)
+    sz_mx = _as_mlx_array(sz, dtype=mx.float32)
+    cx_mx = _as_mlx_array(c_cx, dtype=mx.float32)
+    cy_mx = _as_mlx_array(c_cy, dtype=mx.float32)
+    cz_mx = _as_mlx_array(c_cz, dtype=mx.float32)
+    ia_mx = _as_mlx_array(c_ia, dtype=mx.int32)
 
     all_px = (mx.expand_dims(sx_mx, 0) + mx.expand_dims(cx_mx, 1) + half_ix).reshape((-1,))
     all_py = (mx.expand_dims(sy_mx, 0) + mx.expand_dims(cy_mx, 1) + half_iy).reshape((-1,))
@@ -358,8 +403,8 @@ def _shadow_cone_mlx(
 ):
     mx = _require_mlx()
 
-    zpix_mx = zpix if isinstance(zpix, mx.array) else mx.array(zpix)
-    atom_mx = atom_buf if isinstance(atom_buf, mx.array) else mx.array(atom_buf)
+    zpix_mx = _as_mlx_array(zpix, dtype=mx.float32)
+    atom_mx = _as_mlx_array(atom_buf, dtype=mx.int32)
     has_atom: Any = atom_mx != 0
     pconetot = mx.ones(zpix_mx.shape, dtype=mx.float32)
     shadow_pad = 50
@@ -376,8 +421,7 @@ def _shadow_cone_mlx(
     max_dark = np.float32(shadow_max_dark)
     count = mx.zeros(zpix_mx.shape, dtype=mx.int32)
     # Chunk offsets to keep graph compact while amortizing per-offset overhead.
-    for start in range(0, len(_SHADOW_OFFSETS), _MLX_SHADOW_CHUNK):
-        chunk = _SHADOW_OFFSETS[start : start + _MLX_SHADOW_CHUNK]
+    for chunk, radii in zip(_shadow_offset_chunks(_MLX_SHADOW_CHUNK), _mlx_shadow_chunk_radii()):
         shifted_z = mx.stack(
             [
                 zpix_shadow_padded[shadow_pad + di : shadow_pad + di + height, shadow_pad + dj : shadow_pad + dj + width]
@@ -386,7 +430,6 @@ def _shadow_cone_mlx(
             axis=0,
         )
         rzdiff = shifted_z - zpix_mx[None, :, :]
-        radii = mx.array(np.array([radius for _di, _dj, radius in chunk], dtype=np.float32))[:, None, None]
         shadow_mask: Any = has_atom[None, :, :] & (rzdiff > min_z) & ((radii * angle) < (rzdiff + min_z))
         count = count + mx.sum(shadow_mask.astype(mx.int32), axis=0)
 
@@ -592,11 +635,11 @@ def _outline_kernel34_mlx(
 ):
     mx = _require_mlx()
 
-    zpix_mx = zpix if isinstance(zpix, mx.array) else mx.array(zpix)
-    atom_mx = atom_buf if isinstance(atom_buf, mx.array) else mx.array(atom_buf)
-    bio_mx = bio_buf if isinstance(bio_buf, mx.array) else mx.array(bio_buf)
-    su_lookup_mx = mx.array(su_lookup)
-    res_lookup_mx = mx.array(res_lookup)
+    zpix_mx = _as_mlx_array(zpix, dtype=mx.float32)
+    atom_mx = _as_mlx_array(atom_buf, dtype=mx.int32)
+    bio_mx = _as_mlx_array(bio_buf, dtype=mx.int32)
+    su_lookup_mx = _as_mlx_array(su_lookup, dtype=mx.int32)
+    res_lookup_mx = _as_mlx_array(res_lookup, dtype=mx.int32)
 
     height, width = zpix_mx.shape
     su_map = mx.take(su_lookup_mx, atom_mx)
@@ -920,11 +963,11 @@ def _outline_kernel12_mlx(
 
     mx = _require_mlx()
 
-    zpix_mx = zpix if isinstance(zpix, mx.array) else mx.array(zpix)
-    atom_mx = atom_buf if isinstance(atom_buf, mx.array) else mx.array(atom_buf)
-    bio_mx = bio_buf if isinstance(bio_buf, mx.array) else mx.array(bio_buf)
-    su_lookup_mx = mx.array(su_lookup)
-    res_lookup_mx = mx.array(res_lookup)
+    zpix_mx = _as_mlx_array(zpix, dtype=mx.float32)
+    atom_mx = _as_mlx_array(atom_buf, dtype=mx.int32)
+    bio_mx = _as_mlx_array(bio_buf, dtype=mx.int32)
+    su_lookup_mx = _as_mlx_array(su_lookup, dtype=mx.int32)
+    res_lookup_mx = _as_mlx_array(res_lookup, dtype=mx.int32)
 
     height, width = zpix_mx.shape
     su_map = mx.take(su_lookup_mx, atom_mx)
@@ -964,10 +1007,10 @@ def _outline_kernel12_mlx(
 
     if kernel == 1:
         lap_offsets = _KERNEL1_LAP_OFFSETS
-        lap_weights = mx.array(_KERNEL1_LAP_WEIGHTS)
+        lap_weights = _mlx_outline12_lap_weights(1)
     else:
         lap_offsets = _KERNEL2_LAP_OFFSETS
-        lap_weights = mx.array(_KERNEL2_LAP_WEIGHTS)
+        lap_weights = _mlx_outline12_lap_weights(2)
 
     zpad = 2
     zpix_padded = mx.pad(zpix_mx, [(zpad, zpad), (zpad, zpad)], mode="constant", constant_values=0.0)
@@ -1107,28 +1150,28 @@ def _composite_mlx(
 ):
     mx = _require_mlx()
 
-    zpix_mx = zpix if isinstance(zpix, mx.array) else mx.array(zpix)
-    atom_mx = atom_buf if isinstance(atom_buf, mx.array) else mx.array(atom_buf)
-    cone_mx = pconetot if isinstance(pconetot, mx.array) else mx.array(pconetot)
-    l_opacity_mx = l_opacity if isinstance(l_opacity, mx.array) else mx.array(l_opacity)
-    type_lookup_mx = mx.array(type_lookup)
-    color_lut = mx.array(colortype)
-    fog_color_mx = mx.array(fog_color)
+    zpix_mx = _as_mlx_array(zpix, dtype=mx.float32)
+    atom_mx = _as_mlx_array(atom_buf, dtype=mx.int32)
+    cone_mx = _as_mlx_array(pconetot, dtype=mx.float32)
+    l_opacity_mx = _as_mlx_array(l_opacity, dtype=mx.float32)
+    type_lookup_mx = _as_mlx_array(type_lookup, dtype=mx.int32)
+    color_lut = _as_mlx_array(colortype, dtype=mx.float32)
+    fog_color_mx = _as_mlx_array(fog_color, dtype=mx.float32)
 
     zpix_max = mx.minimum(mx.max(zpix_mx), np.float32(0.0))
     mol_mask: Any = zpix_mx != np.float32(zbuf_bg)
-    if int(mx.sum(mol_mask.astype(mx.int32)).item()) > 0:
-        zpix_min = mx.min(mx.where(mol_mask, zpix_mx, np.float32(100000.0)))
-    else:
-        zpix_min = mx.array(np.float32(100000.0))
+    zpix_min = mx.min(mx.where(mol_mask, zpix_mx, np.float32(100000.0)))
     zpix_clamped = mx.minimum(zpix_mx, np.float32(0.0))
     zpix_spread = zpix_max - zpix_min
     pfogdiff = np.float32(fog_front - fog_back)
 
-    if float(zpix_spread.item()) != 0.0:
-        pfh = np.float32(fog_front) - (zpix_max - zpix_clamped) / zpix_spread * pfogdiff
-    else:
-        pfh = mx.full(zpix_mx.shape, np.float32(fog_front), dtype=mx.float32)
+    safe_spread = mx.where(zpix_spread != np.float32(0.0), zpix_spread, np.float32(1.0))
+    pfh_raw = np.float32(fog_front) - (zpix_max - zpix_clamped) / safe_spread * pfogdiff
+    pfh = mx.where(
+        zpix_spread != np.float32(0.0),
+        pfh_raw,
+        mx.full(zpix_mx.shape, np.float32(fog_front), dtype=mx.float32),
+    )
     pfh = mx.where(zpix_clamped < zpix_min, np.float32(1.0), pfh).astype(mx.float32)
 
     atom_idx = atom_mx.astype(mx.int32)

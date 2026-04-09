@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -32,6 +33,19 @@ def _write_minimal_pdb(path: Path) -> None:
     path.write_text(line + "\nEND\n", encoding="utf-8")
 
 
+def _write_multi_atom_pdb(path: Path, atom_count: int) -> None:
+    lines: list[str] = []
+    for idx in range(1, atom_count + 1):
+        x = float((idx % 30) - 15) * 0.6
+        y = float(((idx // 30) % 20) - 10) * 0.6
+        z = -5.0 - float(idx % 3) * 0.1
+        lines.append(
+            f"{'ATOM':<6}{idx:5d} {'CA':<4}{' ':1}{'GLY':>3} {'A':1}{1:4d}    "
+            f"{x:8.3f}{y:8.3f}{z:8.3f}"
+        )
+    path.write_text("\n".join(lines) + "\nEND\n", encoding="utf-8")
+
+
 def _minimal_params(pdb_path: Path) -> RenderParams:
     params = RenderParams(
         pdb_path=str(pdb_path),
@@ -49,6 +63,68 @@ def _minimal_params(pdb_path: Path) -> RenderParams:
     params.world.width = 80
     params.world.height = 80
     return params
+
+
+class _FakeGPUArray:
+    def __init__(self, data: object, *, dtype: np.dtype | type[np.generic] | None = None) -> None:
+        self._data = np.asarray(data, dtype=dtype)
+
+    def __array__(
+        self,
+        dtype: np.dtype[Any] | None = None,
+        copy: bool | None = None,
+    ) -> np.ndarray:
+        del copy
+        return np.asarray(self._data, dtype=dtype)
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self._data.shape
+
+    @property
+    def dtype(self) -> np.dtype[Any]:
+        return self._data.dtype
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __getitem__(self, item: object) -> _FakeGPUArray:
+        return _FakeGPUArray(self._data[item], dtype=self._data.dtype)
+
+    def astype(self, dtype: np.dtype | type[np.generic]) -> _FakeGPUArray:
+        return _FakeGPUArray(self._data.astype(dtype), dtype=dtype)
+
+    def copy(self) -> _FakeGPUArray:
+        return _FakeGPUArray(self._data.copy(), dtype=self._data.dtype)
+
+
+class _FakeBackendModule:
+    def __init__(self, *, mode: str) -> None:
+        self.mode = mode
+        self.float32 = np.float32
+        self.int32 = np.int32
+        self.calls = {"array": 0, "asarray": 0, "asnumpy": 0, "eval": 0}
+
+    def array(self, values: object, dtype: np.dtype | type[np.generic] | None = None) -> _FakeGPUArray:
+        self.calls["array"] += 1
+        return _FakeGPUArray(values, dtype=dtype)
+
+    def asarray(self, values: object, dtype: np.dtype | type[np.generic] | None = None) -> _FakeGPUArray:
+        self.calls["asarray"] += 1
+        return _FakeGPUArray(values, dtype=dtype)
+
+    def zeros(self, shape: tuple[int, ...], dtype: np.dtype | type[np.generic] = np.float32) -> _FakeGPUArray:
+        return _FakeGPUArray(np.zeros(shape, dtype=dtype), dtype=dtype)
+
+    def ones(self, shape: tuple[int, ...], dtype: np.dtype | type[np.generic] = np.float32) -> _FakeGPUArray:
+        return _FakeGPUArray(np.ones(shape, dtype=dtype), dtype=dtype)
+
+    def asnumpy(self, values: object, dtype: np.dtype | type[np.generic] | None = None) -> np.ndarray:
+        self.calls["asnumpy"] += 1
+        return np.asarray(values, dtype=dtype)
+
+    def eval(self, *_args: object) -> None:
+        self.calls["eval"] += 1
 
 
 def test_raster_kernel_dispatch_contract_keys_present() -> None:
@@ -839,3 +915,177 @@ def test_render_gpu_backend_outline12_path_skips_numpy_materialization(
     assert (result.width, result.height) == (expected_width, expected_height)
     assert result.rgb.shape == (expected_height, expected_width, 3)
     assert result.opacity.shape == (expected_height, expected_width)
+
+
+@pytest.mark.parametrize("backend_name, kernel_name", [("cupy", "asarray"), ("mlx", "array")])
+def test_rasterize_atoms_uploads_backend_arrays_once_per_visible_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_name: str,
+    kernel_name: str,
+) -> None:
+    pdb_path = tmp_path / "many_atoms.pdb"
+    _write_multi_atom_pdb(pdb_path, 600)
+    params = _minimal_params(pdb_path)
+    atoms = load_pdb(pdb_path, params.rules)
+    program = render_module._program_from_params(params)
+    scene = render_pipeline_module.prepare_scene(program, atoms)
+    fake_backend = _FakeBackendModule(mode=backend_name)
+
+    buffers = render_pipeline_module.BackendBuffers(
+        backend_name=backend_name,
+        zpix=_FakeGPUArray(np.full((scene.layout.width, scene.layout.height), -10000.0, dtype=np.float32)),
+        atom_buf=_FakeGPUArray(np.zeros((scene.layout.width, scene.layout.height), dtype=np.int32)),
+        bio_buf=_FakeGPUArray(np.ones((scene.layout.width, scene.layout.height), dtype=np.int32)),
+        cupy_mod=fake_backend if backend_name == "cupy" else None,
+        mlx_mod=fake_backend if backend_name == "mlx" else None,
+    )
+
+    calls = {"chunks": 0}
+
+    def fake_run_kernel(**kwargs):
+        calls["chunks"] += 1
+        for name in ("sx", "sy", "sz", "c_cx", "c_cy", "c_cz", "c_ia", "zpix", "atom_buf", "bio_buf"):
+            assert isinstance(kwargs[name], _FakeGPUArray)
+        assert len(kwargs["c_ia"]) <= 512
+        return kwargs["zpix"], kwargs["atom_buf"], kwargs["bio_buf"]
+
+    monkeypatch.setattr(render_pipeline_module, "run_kernel", fake_run_kernel)
+
+    render_pipeline_module._rasterize_atoms(scene, atoms, buffers, render_module._precompute_sphere)
+
+    assert calls["chunks"] == 2
+    assert fake_backend.calls[kernel_name] == 7
+    other_kernel = "array" if kernel_name == "asarray" else "asarray"
+    assert fake_backend.calls[other_kernel] == 0
+
+
+@pytest.mark.parametrize("backend_name", ["cupy", "mlx"])
+def test_render_gpu_shadow_and_composite_fast_path_stays_backend_native(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_name: str,
+) -> None:
+    pdb_path = tmp_path / "mini.pdb"
+    _write_minimal_pdb(pdb_path)
+    params = _minimal_params(pdb_path)
+    params.outlines.enabled = False
+    params.world.shadows = True
+    atoms = load_pdb(pdb_path, params.rules)
+    program = render_module._program_from_params(params)
+    scene = render_pipeline_module.prepare_scene(program, atoms)
+    fake_backend = _FakeBackendModule(mode=backend_name)
+
+    width, height = render_module.estimate_render_size(atoms, params)
+    base_zpix = np.full((width, height), -10000.0, dtype=np.float32)
+    base_atom_buf = np.zeros((width, height), dtype=np.int32)
+    base_bio_buf = np.ones((width, height), dtype=np.int32)
+    base_atom_buf[8:20, 9:21] = 1
+    base_zpix[8:20, 9:21] = -4.0
+
+    def make_buffers(name: str) -> render_pipeline_module.BackendBuffers:
+        if name == "numpy":
+            return render_pipeline_module.BackendBuffers(
+                backend_name=name,
+                zpix=base_zpix.copy(),
+                atom_buf=base_atom_buf.copy(),
+                bio_buf=base_bio_buf.copy(),
+            )
+        return render_pipeline_module.BackendBuffers(
+            backend_name=name,
+            zpix=_FakeGPUArray(base_zpix.copy()),
+            atom_buf=_FakeGPUArray(base_atom_buf.copy()),
+            bio_buf=_FakeGPUArray(base_bio_buf.copy()),
+            cupy_mod=fake_backend if name == "cupy" else None,
+            mlx_mod=fake_backend if name == "mlx" else None,
+        )
+
+    calls = {"shadow": 0, "composite": 0}
+
+    def fake_shadow_kernel(**kwargs):
+        calls["shadow"] += 1
+        assert kwargs["backend"] in {"numpy", backend_name}
+        zpix_np = np.asarray(kwargs["zpix"], dtype=np.float32)
+        atom_np = np.asarray(kwargs["atom_buf"], dtype=np.int32)
+        shadow_np = raster_kernel_module.run_shadow_kernel(
+            backend="numpy",
+            zpix=zpix_np,
+            atom_buf=atom_np,
+            shadow_strength=float(kwargs["shadow_strength"]),
+            shadow_angle=float(kwargs["shadow_angle"]),
+            shadow_min_z=float(kwargs["shadow_min_z"]),
+            shadow_max_dark=float(kwargs["shadow_max_dark"]),
+        )
+        if backend_name == "numpy":
+            return shadow_np
+        return _FakeGPUArray(shadow_np, dtype=np.float32)
+
+    def fake_composite_kernel(**kwargs):
+        calls["composite"] += 1
+        assert kwargs["backend"] in {"numpy", backend_name}
+        zpix_np = np.asarray(kwargs["zpix"], dtype=np.float32)
+        atom_np = np.asarray(kwargs["atom_buf"], dtype=np.int32)
+        pconetot_np = np.asarray(kwargs["pconetot"], dtype=np.float32)
+        l_opacity_np = np.asarray(kwargs["l_opacity"], dtype=np.float32)
+        rgb_np, alpha_np = raster_kernel_module.run_composite_kernel(
+            backend="numpy",
+            zpix=zpix_np,
+            atom_buf=atom_np,
+            pconetot=pconetot_np,
+            l_opacity=l_opacity_np,
+            type_lookup=np.asarray(kwargs["type_lookup"], dtype=np.int32),
+            colortype=np.asarray(kwargs["colortype"], dtype=np.float32),
+            fog_color=np.asarray(kwargs["fog_color"], dtype=np.float32),
+            fog_front=float(kwargs["fog_front"]),
+            fog_back=float(kwargs["fog_back"]),
+            zbuf_bg=float(kwargs["zbuf_bg"]),
+        )
+        if backend_name == "numpy":
+            return rgb_np, alpha_np
+        return _FakeGPUArray(rgb_np, dtype=np.float32), _FakeGPUArray(alpha_np, dtype=np.float32)
+
+    def fake_initialize_backend_buffers(name: str, width: int, height: int) -> render_pipeline_module.BackendBuffers:
+        assert name == backend_name
+        return make_buffers(name)
+
+    monkeypatch.setattr(render_pipeline_module, "_initialize_backend_buffers", fake_initialize_backend_buffers)
+    monkeypatch.setattr(render_pipeline_module, "_rasterize_atoms", lambda *args, **kwargs: None)
+    monkeypatch.setattr(render_pipeline_module, "run_shadow_kernel", fake_shadow_kernel)
+    monkeypatch.setattr(render_pipeline_module, "run_composite_kernel", fake_composite_kernel)
+
+    shadow_np = raster_kernel_module.run_shadow_kernel(
+        backend="numpy",
+        zpix=base_zpix.copy(),
+        atom_buf=base_atom_buf.copy(),
+        shadow_strength=float(params.world.shadow_strength),
+        shadow_angle=float(params.world.shadow_angle),
+        shadow_min_z=float(params.world.shadow_min_z),
+        shadow_max_dark=float(params.world.shadow_max_dark),
+    )
+    expected = render_pipeline_module._compose_numpy(
+        scene,
+        atoms,
+        shadow_np.copy(),
+        base_atom_buf.copy(),
+        base_bio_buf.copy(),
+        shadow_np,
+        None,
+    )
+    gpu = render_pipeline_module.render_program(
+        program,
+        atoms,
+        backend_name=backend_name,
+        sphere_lookup=render_module._precompute_sphere,
+    )
+
+    assert calls == {"shadow": 1, "composite": 1}
+    assert gpu.width == width
+    assert gpu.height == height
+    assert np.array_equal(expected.rgb, gpu.rgb)
+    assert np.array_equal(expected.opacity, gpu.opacity)
+    if backend_name == "cupy":
+        assert fake_backend.calls["asnumpy"] == 2
+        assert fake_backend.calls["eval"] == 0
+    else:
+        assert fake_backend.calls["eval"] == 1
+        assert fake_backend.calls["asnumpy"] == 0

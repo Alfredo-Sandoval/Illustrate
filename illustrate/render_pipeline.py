@@ -249,6 +249,20 @@ def _rasterize_atoms(
     fix = float(layout.width)
     fiy = float(layout.height)
 
+    def backend_float_array(values: np.ndarray) -> Any:
+        if buffers.cupy_mod is not None:
+            return buffers.cupy_mod.asarray(values, dtype=buffers.cupy_mod.float32)
+        if buffers.mlx_mod is not None:
+            return buffers.mlx_mod.array(values, dtype=buffers.mlx_mod.float32)
+        return np.asarray(values, dtype=np.float32)
+
+    def backend_int_array(values: np.ndarray) -> Any:
+        if buffers.cupy_mod is not None:
+            return buffers.cupy_mod.asarray(values, dtype=buffers.cupy_mod.int32)
+        if buffers.mlx_mod is not None:
+            return buffers.mlx_mod.array(values, dtype=buffers.mlx_mod.int32)
+        return np.asarray(values, dtype=np.int32)
+
     for irad in range(1, scene.ndes + 1):
         sphere = sphere_lookup(float(scene.radtype[irad]))
         if len(sphere) == 0:
@@ -259,9 +273,9 @@ def _rasterize_atoms(
             continue
 
         nv = len(sphere)
-        sx = sphere[:, 0]
-        sy = sphere[:, 1]
-        sz = sphere[:, 2]
+        sx = backend_float_array(sphere[:, 0])
+        sy = backend_float_array(sphere[:, 1])
+        sz = backend_float_array(sphere[:, 2])
 
         for ibio in range(1, layout.nbiomat + 1):
             bm = layout.biomats[ibio]
@@ -277,10 +291,10 @@ def _rasterize_atoms(
                 continue
 
             vis_idx = np.where(visible)[0]
-            cx_vis = cx_all[vis_idx]
-            cy_vis = cy_all[vis_idx]
-            cz_vis = cz_all[vis_idx]
-            ia_vis = matching[vis_idx] + 1
+            cx_vis = backend_float_array(cx_all[vis_idx])
+            cy_vis = backend_float_array(cy_all[vis_idx])
+            cz_vis = backend_float_array(cz_all[vis_idx])
+            ia_vis = backend_int_array(matching[vis_idx] + 1)
 
             for chunk_start in range(0, len(vis_idx), _CHUNK_ATOMS):
                 chunk_end = min(chunk_start + _CHUNK_ATOMS, len(vis_idx))
