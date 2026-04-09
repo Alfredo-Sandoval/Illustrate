@@ -1,11 +1,11 @@
 # Template preset: base/python-first quality gates.
-.PHONY: env setup bootstrap install-desktop start package package-macos package-windows env-macos env-linux env-windows loc lint typecheck test qa docs-build docs-serve docs-check clean
+.PHONY: env setup bootstrap install-desktop start package package-macos package-windows env-macos env-linux env-windows loc lint typecheck test test-cov qa docs-build docs-serve docs-check clean
 
 ENV_ARGS ?=
 PYTHON ?= python
 MKDOCS ?= mkdocs
 DOCS_WARN_ENV ?= NO_MKDOCS_2_WARNING=1
-SOURCE_DIRS ?= illustrate_py illustrate_core illustrate_gui illustrate_notebook illustrate_web
+SOURCE_DIRS ?= illustrate illustrate_gui illustrate_web tests
 EXCLUDE_PATHS ?= .git .venv venv env node_modules .next .turbo out __pycache__ *.egg-info .eggs .pytest_cache .ruff_cache .mypy_cache .cache build dist htmlcov coverage .coverage site results data external
 LOC_PRUNE_NAMES := $(foreach p,$(EXCLUDE_PATHS),-name '$(p)' -o ) -false
 LOC_GROUP_DEPTH ?= 2
@@ -73,6 +73,9 @@ typecheck:
 
 test:
 	pytest
+
+test-cov:
+	pytest --cov=illustrate --cov=illustrate_gui --cov=illustrate_web --cov-report=term-missing
 
 qa: lint typecheck test
 

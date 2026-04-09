@@ -17,7 +17,7 @@ def _default_transform() -> dict[str, float]:
     }
 
 
-def _clamp_numeric(value: object, default: float) -> float:
+def _clamp_numeric(value: Any, default: float) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):

@@ -21,7 +21,7 @@ def _default_outlines() -> dict[str, float | int | bool]:
     }
 
 
-def _coerce_float(value: object, default: float) -> float:
+def _coerce_float(value: Any, default: float) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -29,11 +29,19 @@ def _coerce_float(value: object, default: float) -> float:
 
 
 try:
-    from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QRadioButton, QWidget
+    from PySide6.QtWidgets import QWidget
 except Exception:  # pragma: no cover
-    QWidget = object  # type: ignore
-    QDoubleSpinBox = None
-    QComboBox = None
+    _HAS_QT_WIDGETS = False
+else:
+    _HAS_QT_WIDGETS = True
+
+
+def _require_qt_widgets() -> tuple[Any, Any, Any, Any, Any]:
+    try:
+        from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QRadioButton
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("PySide6 is required for GUI widgets") from exc
+    return QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QRadioButton
 
 
 def _normalize(values: Mapping[str, Any] | None, **overrides: Any) -> dict[str, float | int | bool]:
@@ -56,7 +64,7 @@ def _normalize(values: Mapping[str, Any] | None, **overrides: Any) -> dict[str, 
     return merged
 
 
-if QDoubleSpinBox is None:
+if not _HAS_QT_WIDGETS:
 
     class OutlinesPanel:
         """Fallback outlines panel."""
@@ -84,6 +92,7 @@ else:
 
         def __init__(self, on_changed: Callable[[dict[str, float | int | bool]], None] | None = None) -> None:
             super().__init__()
+            QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QRadioButton = _require_qt_widgets()
             self._on_changed = on_changed
             self._value = _default_outlines()
 
@@ -156,7 +165,6 @@ else:
             for widget in (
                 self.contour_low,
                 self.contour_high,
-                self.kernel,
                 self.z_diff_min,
                 self.z_diff_max,
                 self.subunit_low,
@@ -165,10 +173,8 @@ else:
                 self.residue_high,
                 self.residue_diff,
             ):
-                if hasattr(widget, "valueChanged"):
-                    widget.valueChanged.connect(self._sync)
-                else:
-                    widget.currentTextChanged.connect(self._sync)
+                widget.valueChanged.connect(self._sync)
+            self.kernel.currentTextChanged.connect(self._sync)
             self.enabled_off.toggled.connect(self._sync)
 
         @property

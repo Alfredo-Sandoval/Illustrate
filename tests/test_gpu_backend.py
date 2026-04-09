@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import importlib
 from pathlib import Path
 
@@ -8,6 +7,7 @@ import numpy as np
 import pytest
 
 from illustrate.pdb import load_pdb
+import illustrate.raster_kernel as raster_kernel_module
 from illustrate.raster_kernel import (
     backend_available,
     run_composite_kernel,
@@ -137,10 +137,12 @@ def test_backend_available_handles_missing_parent_package(monkeypatch: pytest.Mo
             raise ModuleNotFoundError(f"No module named '{name.split('.')[0]}'")
         return object()
 
+    raster_kernel_module._clear_optional_module_probe_cache()
     monkeypatch.setattr("importlib.util.find_spec", fake_find_spec)
     assert backend_available("numpy") is True
     assert backend_available("cupy") is False
     assert backend_available("mlx") is False
+    raster_kernel_module._clear_optional_module_probe_cache()
 
 
 def test_shadow_kernel_contract_numpy_vs_mlx() -> None:
@@ -159,7 +161,7 @@ def test_shadow_kernel_contract_numpy_vs_mlx() -> None:
         shadow_max_dark=0.2,
     )
 
-    if importlib.util.find_spec("mlx.core") is None:
+    if not backend_available("mlx"):
         with pytest.raises(RuntimeError, match="MLX backend requested but MLX is unavailable"):
             run_shadow_kernel(
                 backend="mlx",
@@ -382,7 +384,7 @@ def test_outline_kernel34_contract_numpy_vs_mlx() -> None:
         kernel=4,
     )
 
-    if importlib.util.find_spec("mlx.core") is None:
+    if not backend_available("mlx"):
         with pytest.raises(RuntimeError, match="MLX backend requested but MLX is unavailable"):
             run_outline34_kernel(
                 backend="mlx",
@@ -454,7 +456,7 @@ def test_composite_kernel_contract_numpy_vs_mlx() -> None:
         zbuf_bg=-10000.0,
     )
 
-    if importlib.util.find_spec("mlx.core") is None:
+    if not backend_available("mlx"):
         with pytest.raises(RuntimeError, match="MLX backend requested but MLX is unavailable"):
             run_composite_kernel(
                 backend="mlx",
@@ -536,7 +538,7 @@ def test_render_cupy_backend_contract(tmp_path: Path) -> None:
     params = _minimal_params(pdb_path)
     atoms = load_pdb(pdb_path, params.rules)
 
-    if importlib.util.find_spec("cupy") is None:
+    if not backend_available("cupy"):
         with pytest.raises(RuntimeError, match="CuPy backend requested but CuPy is unavailable"):
             render_from_atoms(atoms, params, backend="cupy")
         return
@@ -556,7 +558,7 @@ def test_render_mlx_backend_contract(tmp_path: Path) -> None:
     params = _minimal_params(pdb_path)
     atoms = load_pdb(pdb_path, params.rules)
 
-    if importlib.util.find_spec("mlx.core") is None:
+    if not backend_available("mlx"):
         with pytest.raises(RuntimeError, match="MLX backend requested but MLX is unavailable"):
             render_from_atoms(atoms, params, backend="mlx")
         return

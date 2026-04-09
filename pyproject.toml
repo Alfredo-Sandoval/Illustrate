@@ -48,3 +48,6 @@ markers = [
   "port: porting workflow tests",
   "parity: source-vs-target parity tests",
 ]
+
+[tool.ruff]
+extend-exclude = ["illustrate.ipynb"]

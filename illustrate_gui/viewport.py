@@ -296,13 +296,13 @@ class _ViewportBehavior:
         painter.drawPixmap(x, y, scaled)
         self._draw_orientation_gizmo(painter)
 
-    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+    def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
             self._last_point = event.position().toPoint()
             self._touch_preview_window()
 
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if not self._dragging or self._last_point is None:
             return
         current = event.position().toPoint()
@@ -312,13 +312,13 @@ class _ViewportBehavior:
         self.rotation_requested.emit(float(dy * 0.5), float(dx * 0.5))  # type: ignore[attr-defined]
         self._touch_preview_window()
 
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         self._dragging = False
         self._last_point = None
         self._touch_preview_window(0.35)
         super().mouseReleaseEvent(event)  # type: ignore[misc]
 
-    def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
+    def wheelEvent(self, event: QWheelEvent) -> None:
         if event.angleDelta().y() == 0:
             return
         factor = 1.0 + (0.1 if event.angleDelta().y() > 0 else -0.1)
@@ -335,7 +335,7 @@ class _RasterViewport(_ViewportBehavior, QWidget):
         super().__init__()
         self._init_view()
 
-    def paintEvent(self, event) -> None:  # type: ignore[override]
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         self._paint_content(painter)
 
@@ -350,7 +350,7 @@ if QOpenGLWidget is not None:
             super().__init__()
             self._init_view()
 
-        def paintGL(self) -> None:  # type: ignore[override]
+        def paintGL(self) -> None:
             painter = QPainter(self)
             self._paint_content(painter)
             painter.end()
@@ -360,12 +360,15 @@ else:
     _OpenGLViewport = _RasterViewport
 
 
-class RenderViewport(_OpenGLViewport if _should_use_opengl_backend() else _RasterViewport):
-    """Viewport used by desktop UI.
+if _should_use_opengl_backend():
 
-    Uses QOpenGLWidget when available for hardware-accelerated painting and
-    falls back to QWidget under headless/offscreen or when OpenGL is disabled.
-    """
+    class RenderViewport(_OpenGLViewport):
+        """Viewport used by desktop UI with OpenGL acceleration when available."""
+
+else:
+
+    class RenderViewport(_RasterViewport):
+        """Viewport used by desktop UI with raster fallback rendering."""
 
 
 def is_opengl_viewport(widget: QWidget) -> bool:

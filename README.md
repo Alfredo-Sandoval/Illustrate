@@ -108,7 +108,7 @@ Key pages: [Getting Started](docs/getting-started.md) · [Desktop GUI](docs/guid
 
 David S. Goodsell originally wrote Illustrate in Fortran at The Scripps Research Institute (released 2019). This is a Python reimplementation that keeps command-file compatibility and adds desktop and web frontends on the same rendering core.
 
-> DS Goodsell & AJ Olson (1992) "Molecular Illustration in Black and White" *J Mol Graphics* 10, 235-240.
+> DS Goodsell & AJ Olson (1992) "Molecular Illustration in Black and White" _J Mol Graphics_ 10, 235-240.
 
 ## License
 

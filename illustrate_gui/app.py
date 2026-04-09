@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import hashlib
 import sys
-import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -24,25 +23,24 @@ from illustrate import (
     params_from_json,
     params_to_json,
 )
-from illustrate.fetch import fetch_pdb
 from illustrate.io import write_png, write_svg
-from illustrate.pdb import load_pdb
 from illustrate.presets import default_rules, preset_library
 from illustrate_gui.panels.outlines import OutlinesPanel
 from illustrate_gui.panels.rules import RulePanel
 from illustrate_gui.panels.transform import TransformPanel
 from illustrate_gui.panels.world import WorldPanel
 from illustrate_gui.autocomplete import PdbCompleter
+from illustrate_gui.flows import PreviewFlowController, RenderFlowController, StructureFlowController
 from illustrate_gui.updater import RELEASES_PAGE_URL, check_for_updates
 from illustrate_gui.viewport import RenderViewport
-from illustrate_gui.worker import RenderRequest, RenderWorker
+from illustrate_gui.worker import FetchWorker, LoadWorker, RenderWorker
 
 _AUTO_FRAME_PAD = 30
 _INTERACTIVE_SETTLE_MS = 180
 
 
 try:
-    from PySide6.QtCore import Qt, Signal
+    from PySide6.QtCore import Qt
     from PySide6.QtCore import QTimer
     from PySide6.QtGui import QGuiApplication, QIcon, QImage, QPixmap
     from PySide6.QtWidgets import (
@@ -609,9 +607,6 @@ def _runtime_data_dir() -> Path:
 
 
 class MainWindow(QMainWindow):
-    _fetch_done_signal = Signal(str, str)  # (path, pdb_id)
-    _fetch_failed_signal = Signal(str)  # (error message)
-
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Illustrate")
@@ -623,7 +618,9 @@ class MainWindow(QMainWindow):
         if _icon_path.exists():
             _app_icon = QIcon(str(_icon_path))
             self.setWindowIcon(_app_icon)
-            QApplication.instance().setWindowIcon(_app_icon)
+            app_instance = QApplication.instance()
+            if isinstance(app_instance, QApplication):
+                app_instance.setWindowIcon(_app_icon)
 
         self.pdb_path: str | None = None
         self._atoms: Any = None
@@ -635,6 +632,10 @@ class MainWindow(QMainWindow):
         self._suppress_preview_render_once = False
         self._suspend_panel_callbacks = False
         self._params_dirty = False
+        self._atoms_loading = False
+        self._load_render_after_load = False
+        self._load_request_id = 0
+        self._latest_load_request_id = 0
         self._render_btn: QToolButton | None = None
         self._render_started_at: float | None = None
         self._render_request_id = 0
@@ -642,19 +643,25 @@ class MainWindow(QMainWindow):
         self._builtin_presets = _builtin_preset_items()
         self._custom_presets: list[tuple[str, RenderParams]] = self._load_custom_presets()
 
-        self._preview_timer = QTimer(self)
-        self._preview_timer.setSingleShot(True)
-        self._preview_timer.timeout.connect(self._submit_preview_render)
-        self._interactive_settle_timer = QTimer(self)
-        self._interactive_settle_timer.setSingleShot(True)
-        self._interactive_settle_timer.timeout.connect(self._on_interactive_settle_timeout)
         self._dimensions_timer = QTimer(self)
         self._dimensions_timer.setSingleShot(True)
         self._dimensions_timer.timeout.connect(self._update_render_dimensions_label)
+        self._structure_flow = StructureFlowController(self, rules_signature=_rules_signature)
+        self._preview_flow = PreviewFlowController(self, interactive_settle_ms=_INTERACTIVE_SETTLE_MS)
+        self._render_flow = RenderFlowController(self)
+        self._preview_timer = self._preview_flow.preview_timer
+        self._interactive_settle_timer = self._preview_flow.interactive_settle_timer
 
-        # ── Fetch signals (thread-safe) ──
-        self._fetch_done_signal.connect(self._on_fetch_done)
-        self._fetch_failed_signal.connect(self._on_fetch_failed)
+        # ── Fetch worker ──
+        self.fetch_worker = FetchWorker()
+        if hasattr(self.fetch_worker, "fetched"):
+            self.fetch_worker.fetched.connect(self._on_fetch_done)
+            self.fetch_worker.failed.connect(self._on_fetch_failed)
+
+        self.load_worker = LoadWorker()
+        if hasattr(self.load_worker, "finished"):
+            self.load_worker.finished.connect(self._on_atoms_loaded)
+            self.load_worker.failed.connect(self._on_atoms_failed)
 
         # ── Worker ──
         self.worker = RenderWorker()
@@ -752,7 +759,7 @@ class MainWindow(QMainWindow):
         self.fit_view_action.triggered.connect(self._fit_view)
         # Style the Render button as primary action
         render_btn = toolbar.widgetForAction(self.render_action)
-        if render_btn is not None:
+        if isinstance(render_btn, QToolButton):
             self._render_btn = render_btn
             render_btn.setStyleSheet(self._render_btn_style(dirty=False))
 
@@ -787,7 +794,8 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(CollapsibleSection("World / Lighting", self.world_panel))
 
         self.outline_panel = OutlinesPanel(on_changed=self._panel_changed)
-        sidebar_layout.addWidget(CollapsibleSection("Outlines", self.outline_panel))
+        outline_widget = self.outline_panel if isinstance(self.outline_panel, QWidget) else QWidget()
+        sidebar_layout.addWidget(CollapsibleSection("Outlines", outline_widget))
 
         sidebar_layout.addStretch(1)
 
@@ -856,7 +864,7 @@ class MainWindow(QMainWindow):
         selection = str(theme).strip().lower()
         stylesheet = DARK_STYLE if selection != "light" else LIGHT_STYLE
         app = QApplication.instance()
-        if app is not None:
+        if isinstance(app, QApplication):
             app.setStyleSheet(stylesheet)
         self._update_render_btn_style()
         if announce:
@@ -1006,6 +1014,10 @@ class MainWindow(QMainWindow):
             return
         self.loaded_model_label.setText(f"Model: {Path(path).name}")
 
+    def _clear_last_result(self) -> None:
+        self._last_result = None
+        self.copy_action.setEnabled(False)
+
     def _set_render_busy(self, busy: bool) -> None:
         if busy:
             self._render_started_at = time.perf_counter()
@@ -1150,12 +1162,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Fitted view (scale {next_scale:.2f})")
 
     def _clear_interactive_preview(self) -> None:
-        self._preview_request_id += 1
-        self._latest_preview_request_id = self._preview_request_id
-        self._preview_pending = False
-        if hasattr(self, "_preview_timer"):
-            self._preview_timer.stop()
-        self.viewport.update_preview_image(None)
+        self._preview_flow.clear_interactive_preview()
 
     def _preview_quality_mode(self) -> str:
         if not hasattr(self, "preview_quality_combo"):
@@ -1281,78 +1288,19 @@ class MainWindow(QMainWindow):
         return params
 
     def _schedule_interactive_settle_render(self) -> None:
-        if not self.auto_render_on_drag.isChecked():
-            return
-        self._interactive_settle_timer.start(_INTERACTIVE_SETTLE_MS)
+        self._preview_flow.schedule_interactive_settle_render()
 
     def _on_interactive_settle_timeout(self) -> None:
-        if not self.auto_render_on_drag.isChecked():
-            return
-        self._render(interactive=False)
+        self._preview_flow.on_interactive_settle_timeout()
 
     def _request_preview_render(self) -> None:
-        self._preview_pending = True
-        if not self._preview_timer.isActive():
-            # Coalesce bursty UI updates to avoid oversubmitting preview jobs.
-            mode = self._preview_quality_mode()
-            delay_ms = 14 if mode == "fast" else (24 if mode == "high" else 20)
-            self._preview_timer.start(delay_ms)
+        self._preview_flow.request_render()
 
     def _submit_preview_render(self) -> None:
-        if not self._preview_pending:
-            return
-        self._preview_pending = False
-        if self.pdb_path is None:
-            return
-        if self._atoms is None:
-            self._load_atoms_if_needed()
-        if self._atoms is None:
-            return
-        try:
-            params = self._build_preview_params()
-        except Exception:
-            return
-        self._preview_request_id += 1
-        request_id = self._preview_request_id
-        self._latest_preview_request_id = request_id
-        request = RenderRequest(params=params, atoms=self._atoms, request_id=request_id)
-        if hasattr(self.preview_worker, "submit"):
-            self.preview_worker.submit(request)
-        else:
-            self.preview_worker.start(request)
+        self._preview_flow.submit_pending_render()
 
     def _push_preview_scene(self) -> None:
-        if self._atoms is None or int(getattr(self._atoms, "n", 0)) <= 0:
-            self.viewport.set_preview_scene(None, None, None)
-            self._clear_interactive_preview()
-            return
-
-        n = int(self._atoms.n)
-        coords = np.asarray(self._atoms.coord[1 : n + 1], dtype=np.float32)
-        atom_types = np.asarray(self._atoms.type_idx[1 : n + 1], dtype=np.int32)
-        if coords.shape[0] == 0:
-            self.viewport.set_preview_scene(None, None, None)
-            self._clear_interactive_preview()
-            return
-
-        rules = self._current_rules()
-        colortype = np.full((len(rules) + 1, 3), 0.74, dtype=np.float32)
-        radtype = np.full((len(rules) + 1,), 1.2, dtype=np.float32)
-        for idx, rule in enumerate(rules, start=1):
-            colortype[idx] = np.asarray(rule.color, dtype=np.float32)
-            radtype[idx] = max(0.0, float(rule.radius))
-
-        atom_types = np.clip(atom_types, 0, len(rules))
-        colors = colortype[atom_types]
-        radii = radtype[atom_types]
-        visible = np.isfinite(coords).all(axis=1) & np.isfinite(radii) & (radii > 0.01)
-        if not np.any(visible):
-            self.viewport.set_preview_scene(None, None, None)
-            self._clear_interactive_preview()
-            return
-
-        self.viewport.set_preview_scene(coords[visible], colors[visible], radii[visible])
-        self._clear_interactive_preview()
+        self._preview_flow.push_preview_scene()
 
     def _save_settings(self) -> None:
         if self.pdb_path is None:
@@ -1429,143 +1377,28 @@ class MainWindow(QMainWindow):
         self._apply_loaded_params(params, source=source)
 
     def _apply_loaded_params(self, params: RenderParams, *, source: Path) -> None:
-        self._suspend_panel_callbacks = True
-        try:
-            transform = params.transform
-            self.transform_panel.set_value(
-                scale=transform.scale,
-                xrot=transform.rotations[2][1] if len(transform.rotations) > 2 else 0.0,
-                yrot=transform.rotations[1][1] if len(transform.rotations) > 1 else 0.0,
-                zrot=transform.rotations[0][1] if len(transform.rotations) > 0 else 90.0,
-                xtran=transform.translate[0],
-                ytran=transform.translate[1],
-                ztran=transform.translate[2],
-            )
-            world = params.world
-            self.world_panel.set_value(
-                background="#%02x%02x%02x" % tuple(int(c * 255) for c in world.background),
-                fog="#%02x%02x%02x" % tuple(int(c * 255) for c in world.fog_color),
-                fog_front=world.fog_front,
-                fog_back=world.fog_back,
-                shadows=world.shadows,
-                shadow_strength=world.shadow_strength,
-                shadow_angle=world.shadow_angle,
-                shadow_min_z=world.shadow_min_z,
-                shadow_max_dark=world.shadow_max_dark,
-            )
-            outlines = params.outlines
-            self.outline_panel.set_value(
-                enabled=outlines.enabled,
-                contour_low=outlines.contour_low,
-                contour_high=outlines.contour_high,
-                kernel=outlines.kernel,
-                z_diff_min=outlines.z_diff_min,
-                z_diff_max=outlines.z_diff_max,
-                subunit_low=outlines.subunit_low,
-                subunit_high=outlines.subunit_high,
-                residue_low=outlines.residue_low,
-                residue_high=outlines.residue_high,
-                residue_diff=outlines.residue_diff,
-            )
-            self.rule_panel.set_value(params.rules)
-            if params.world.width > 0 and params.world.height > 0:
-                self.render_size_mode_combo.setCurrentText("Custom")
-                self.render_width_spin.setValue(int(params.world.width))
-                self.render_height_spin.setValue(int(params.world.height))
-            else:
-                self.render_size_mode_combo.setCurrentText("Auto")
-        finally:
-            self._suspend_panel_callbacks = False
-
-        loaded_pdb = str(params.pdb_path).strip()
-        loaded_file = None
-        if loaded_pdb:
-            candidate = Path(loaded_pdb)
-            if not candidate.is_absolute():
-                candidate = (source.parent / candidate).resolve()
-            if candidate.exists():
-                loaded_file = candidate
-
-        if loaded_file is not None:
-            self.pdb_path = str(loaded_file)
-            self.setWindowTitle(f"Illustrate \u2014 {loaded_file.name}")
-            self._set_loaded_model_label(self.pdb_path)
-            self._atoms = None
-            self._atoms_signature = ""
-            self.viewport.set_preview_scene(None, None, None)
-            self._clear_interactive_preview()
-            self._load_atoms_if_needed()
-
-        self._sync_render_size_controls()
-        self._sync_preview_transform()
-        self._sync_preview_style()
-        self._request_preview_render()
-        self._schedule_render_dimensions_update()
-        if loaded_file is None and loaded_pdb:
-            self.statusBar().showMessage(f"Loaded settings from {source.name} (PDB not found: {loaded_pdb})")
-            if self.pdb_path is None:
-                self._set_loaded_model_label(None)
-        else:
-            self.statusBar().showMessage(f"Loaded settings from {source.name}")
+        self._structure_flow.apply_loaded_params(params, source=source)
 
     def _open_pdb(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open PDB",
-            str(Path.home()),
-            "PDB Files (*.pdb *.ent);;All Files (*)",
-        )
-        if not path:
-            return
-        self.pdb_path = path
-        self.setWindowTitle(f"Illustrate \u2014 {Path(path).name}")
-        self._set_loaded_model_label(path)
-        self._atoms = None
-        self._atoms_signature = ""
-        self.viewport.set_preview_scene(None, None, None)
-        self._clear_interactive_preview()
-        self._load_atoms_if_needed()
-        self._schedule_render_dimensions_update()
-        self.statusBar().showMessage(f"Loaded {Path(path).name}. Click Render.")
+        self._structure_flow.open_pdb()
 
     def _fetch_pdb(self) -> None:
-        pdb_id = self.pdb_id_input.text().strip()
-        if not pdb_id:
-            self.statusBar().showMessage("Enter a PDB ID first.")
-            return
-        self.fetch_action.setEnabled(False)
-        self.statusBar().showMessage(f"Fetching {pdb_id}\u2026")
-
-        def _do_fetch():
-            try:
-                path = fetch_pdb(pdb_id)
-                self._fetch_done_signal.emit(str(path), pdb_id.upper())
-            except Exception as exc:
-                self._fetch_failed_signal.emit(str(exc))
-
-        threading.Thread(target=_do_fetch, daemon=True).start()
+        self._structure_flow.fetch_pdb()
 
     def _on_fetch_done(self, path: str, pdb_id: str) -> None:
-        self.fetch_action.setEnabled(True)
-        self.pdb_path = path
-        self.setWindowTitle(f"Illustrate \u2014 {pdb_id}.pdb")
-        self._set_loaded_model_label(path)
-        self._atoms = None
-        self._atoms_signature = ""
-        self.viewport.set_preview_scene(None, None, None)
-        self._clear_interactive_preview()
-        self._load_atoms_if_needed()
-        self._schedule_render_dimensions_update()
-        self.statusBar().showMessage(f"Fetched {pdb_id}.pdb. Rendering\u2026")
-        self._render()
+        self._structure_flow.on_fetch_done(path, pdb_id)
 
     def _on_fetch_failed(self, message: str) -> None:
-        self.fetch_action.setEnabled(True)
-        self.statusBar().showMessage(f"Fetch failed: {message}")
+        self._structure_flow.on_fetch_failed(message)
 
     def _on_suggestion_selected(self, pdb_id: str) -> None:
-        self.pdb_id_input.setText(pdb_id)
-        self._fetch_pdb()
+        self._structure_flow.on_suggestion_selected(pdb_id)
+
+    def _on_atoms_loaded(self, payload) -> None:
+        self._structure_flow.on_atoms_loaded(payload)
+
+    def _on_atoms_failed(self, payload) -> None:
+        self._structure_flow.on_atoms_failed(payload)
 
     def _build_params(self) -> RenderParams:
         if self.pdb_path is None:
@@ -1582,106 +1415,28 @@ class MainWindow(QMainWindow):
         )
 
     def _load_atoms_if_needed(self) -> None:
-        if self.pdb_path is None:
-            self.rule_panel.set_match_counts(None)
-            return
-        rules = self._current_rules()
-        signature = _rules_signature(rules)
-        if self._atoms is not None and signature == self._atoms_signature:
-            self._push_preview_scene()
-            self._update_rule_match_counts()
-            self._schedule_render_dimensions_update()
-            return
-        self._atoms = load_pdb(self.pdb_path, rules)
-        self._atoms_signature = signature
-        self._push_preview_scene()
-        self._update_rule_match_counts()
-        self._schedule_render_dimensions_update()
+        self._structure_flow.load_atoms_if_needed()
+
+    def _request_atoms_load(self, *, status_message: str | None = None, render_after_load: bool = False) -> None:
+        self._structure_flow.request_atoms_load(status_message=status_message, render_after_load=render_after_load)
 
     def _render_interactive(self) -> None:
-        self._render(interactive=True)
-        self._schedule_interactive_settle_render()
+        self._render_flow.render_interactive()
 
     def _render(self, _checked: bool = False, *, interactive: bool = False) -> None:
-        if self.pdb_path is None:
-            self.statusBar().showMessage("Load a PDB first.")
-            return
-        if not interactive and self._interactive_settle_timer.isActive():
-            self._interactive_settle_timer.stop()
-        try:
-            params = self._build_interactive_rerender_params() if interactive else self._build_params()
-        except Exception as exc:
-            self.statusBar().showMessage(str(exc))
-            return
-
-        self._load_atoms_if_needed()
-        if self._atoms is None:
-            self.statusBar().showMessage("Could not load atoms from PDB.")
-            return
-
-        if not interactive:
-            self.render_action.setEnabled(False)
-            self._set_render_busy(True)
-
-        self._render_request_id += 1
-        request_id = -self._render_request_id if interactive else self._render_request_id
-        request = RenderRequest(params=params, atoms=self._atoms, request_id=request_id)
-        if hasattr(self.worker, "submit"):
-            self.worker.submit(request)
-        else:
-            self.worker.start(request)
-        self.statusBar().showMessage("Re-rendering\u2026" if interactive else "Rendering\u2026")
+        self._render_flow.render(interactive=interactive)
 
     def _on_render_done(self, result) -> None:
-        render_mode = "full"
-        if isinstance(result, tuple) and len(result) == 2:
-            request_id, payload = result
-            result = payload
-            render_mode = "interactive" if int(request_id) < 0 else "full"
-        if render_mode == "full":
-            self.render_action.setEnabled(True)
-        elapsed = self._render_elapsed_suffix()
-        if render_mode == "full":
-            self._set_render_busy(False)
-        self.copy_action.setEnabled(True)
-        if render_mode == "full":
-            self._params_dirty = False
-        self._update_render_btn_style()
-        if not hasattr(result, "rgb"):
-            self.statusBar().showMessage(f"Render returned no image{elapsed}.")
-            return
-        if render_mode == "full":
-            self._last_result = result
-        rgb = np.asarray(result.rgb, dtype=np.uint8)
-        opacity = np.asarray(result.opacity, dtype=np.uint8) if hasattr(result, "opacity") else None
-        self._display_image(rgb, opacity)
-        self._clear_interactive_preview()
-        self._schedule_render_dimensions_update()
-        verb = "Re-rendered" if render_mode == "interactive" else "Rendered"
-        self.statusBar().showMessage(f"{verb} {result.width}\u00d7{result.height}{elapsed}")
+        self._render_flow.on_render_done(result)
 
     def _on_render_failed(self, message: str) -> None:
-        self.render_action.setEnabled(True)
-        elapsed = self._render_elapsed_suffix()
-        self._set_render_busy(False)
-        QMessageBox.critical(self, "Render failed", message)
-        self.statusBar().showMessage(f"Render failed{elapsed}")
+        self._render_flow.on_render_failed(message)
 
     def _on_preview_done(self, payload) -> None:
-        if not isinstance(payload, tuple) or len(payload) != 2:
-            return
-        request_id, result = payload
-        if int(request_id) != self._latest_preview_request_id:
-            return
-        if not hasattr(result, "rgb"):
-            return
-        rgb = np.asarray(result.rgb, dtype=np.uint8)
-        opacity = np.asarray(result.opacity, dtype=np.uint8) if hasattr(result, "opacity") else None
-        self._display_preview_image(rgb, opacity)
+        self._preview_flow.on_preview_done(payload)
 
     def _on_preview_failed(self, _message: str) -> None:
-        # Keep interactive viewport responsive if preview rendering fails.
-        self.viewport.update_preview_image(None)
+        self._preview_flow.on_preview_failed(_message)
 
     @staticmethod
     def _to_rgba(rgb: np.ndarray, opacity: np.ndarray | None) -> np.ndarray | None:
@@ -1881,6 +1636,12 @@ class MainWindow(QMainWindow):
         self._preview_timer.stop()
         self._interactive_settle_timer.stop()
         self._dimensions_timer.stop()
+        if hasattr(self.fetch_worker, "isRunning") and self.fetch_worker.isRunning():
+            self.statusBar().showMessage("Waiting for fetch worker to finish...")
+            self.fetch_worker.wait()
+        if hasattr(self.load_worker, "isRunning") and self.load_worker.isRunning():
+            self.statusBar().showMessage("Waiting for structure load worker to finish...")
+            self.load_worker.wait()
         if hasattr(self.worker, "isRunning") and self.worker.isRunning():
             self.statusBar().showMessage("Waiting for render worker to finish...")
             self.worker.wait()

@@ -7,20 +7,21 @@ from collections import OrderedDict
 import hashlib
 from io import BytesIO
 import threading
+from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from PIL import Image as PILImage
 
 from illustrate import OutlineParams, RenderParams, SelectionRule, Transform, WorldParams, render_from_atoms
 from illustrate.pdb import load_pdb as _load_pdb
 
-from illustrate_web.api.deps import get_upload_path
+from illustrate_web.api.deps import RateLimitExceeded, enforce_rate_limit, get_upload_path
 from illustrate_web.api.models import RenderRequest
 
 router = APIRouter(prefix="/api")
 _ATOM_CACHE_MAX = 16
-_ATOM_CACHE: OrderedDict[tuple[str, str], object] = OrderedDict()
+_ATOM_CACHE: OrderedDict[tuple[str, tuple[int, int, int, int], str], object] = OrderedDict()
 _ATOM_CACHE_LOCK = threading.Lock()
 
 
@@ -55,12 +56,29 @@ def _rules_signature(rules: list[SelectionRule]) -> str:
                 (float(rule.color[0]), float(rule.color[1]), float(rule.color[2])),
                 float(rule.radius),
             )
-        )
+    )
     return hashlib.sha1(repr(payload).encode("utf-8")).hexdigest()
 
 
-def _load_atoms_cached(*, pdb_id: str, pdb_path: str, rules: list[SelectionRule]):
-    key = (str(pdb_id), _rules_signature(rules))
+def _upload_signature(pdb_path: str | Path) -> tuple[int, int, int, int]:
+    stat_result = Path(pdb_path).stat()
+    inode = int(getattr(stat_result, "st_ino", 0) or 0)
+    return (
+        int(stat_result.st_size),
+        int(stat_result.st_mtime_ns),
+        int(stat_result.st_ctime_ns),
+        inode,
+    )
+
+
+def _load_atoms_cached(
+    *,
+    pdb_id: str,
+    pdb_path: str,
+    pdb_signature: tuple[int, int, int, int],
+    rules: list[SelectionRule],
+):
+    key = (str(pdb_id), pdb_signature, _rules_signature(rules))
     with _ATOM_CACHE_LOCK:
         cached = _ATOM_CACHE.get(key)
         if cached is not None:
@@ -68,6 +86,9 @@ def _load_atoms_cached(*, pdb_id: str, pdb_path: str, rules: list[SelectionRule]
             return cached
 
     atoms = _load_pdb(pdb_path, rules)
+    current_signature = _upload_signature(pdb_path)
+    if current_signature != pdb_signature:
+        raise RuntimeError("uploaded PDB changed while rendering")
 
     with _ATOM_CACHE_LOCK:
         _ATOM_CACHE[key] = atoms
@@ -98,11 +119,22 @@ def _normalize_format(value: str) -> str:
 
 
 @router.post("/render")
-async def render_endpoint(payload: RenderRequest) -> StreamingResponse:
+async def render_endpoint(payload: RenderRequest, request: Request) -> StreamingResponse:
+    try:
+        enforce_rate_limit("render", client_host=request.client.host if request.client is not None else None)
+    except RateLimitExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+
     try:
         pdb_path = get_upload_path(payload.pdb_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    pdb_signature = _upload_signature(pdb_path)
 
     try:
         rules = _to_rules(payload.rules)
@@ -161,6 +193,7 @@ async def render_endpoint(payload: RenderRequest) -> StreamingResponse:
             _load_atoms_cached,
             pdb_id=payload.pdb_id,
             pdb_path=params.pdb_path,
+            pdb_signature=pdb_signature,
             rules=params.rules,
         )
     except (TypeError, ValueError) as exc:

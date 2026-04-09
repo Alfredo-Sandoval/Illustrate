@@ -19,7 +19,7 @@ def _default_world() -> dict[str, float | str | bool]:
     }
 
 
-def _coerce(value: object, default: float) -> float:
+def _coerce(value: Any, default: float) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):

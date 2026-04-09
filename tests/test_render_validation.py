@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import cast
 
@@ -78,3 +79,33 @@ def test_params_from_json_allows_null_sections_with_defaults() -> None:
     assert params.transform.autocenter == "auto"
     assert params.world.width == 0
     assert params.outlines.kernel == 4
+
+
+def test_precompute_sphere_reuses_cached_entry() -> None:
+    render_module = importlib.import_module("illustrate.render")
+
+    with render_module._SPHERE_CACHE_LOCK:
+        render_module._SPHERE_CACHE.clear()
+
+    first = render_module._precompute_sphere(2.5)
+    second = render_module._precompute_sphere(2.5)
+
+    assert first is second
+
+
+def test_precompute_sphere_cache_uses_lru_eviction(monkeypatch: pytest.MonkeyPatch) -> None:
+    render_module = importlib.import_module("illustrate.render")
+    monkeypatch.setattr(render_module, "_SPHERE_CACHE_MAX_ENTRIES", 2)
+
+    with render_module._SPHERE_CACHE_LOCK:
+        render_module._SPHERE_CACHE.clear()
+
+    first = render_module._precompute_sphere(1.0)
+    render_module._precompute_sphere(2.0)
+    render_module._precompute_sphere(3.0)
+
+    with render_module._SPHERE_CACHE_LOCK:
+        assert len(render_module._SPHERE_CACHE) == 2
+
+    first_reloaded = render_module._precompute_sphere(1.0)
+    assert first_reloaded is not first

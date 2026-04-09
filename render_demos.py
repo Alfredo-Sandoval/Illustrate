@@ -1,6 +1,7 @@
 """Render a gallery of 2HHB (hemoglobin) with creative presets."""
 
 from pathlib import Path
+from typing import Callable, TypedDict
 import numpy as np
 from PIL import Image
 
@@ -149,9 +150,16 @@ def _monochrome() -> list[SelectionRule]:
     return rules
 
 
+class RenderConfig(TypedDict):
+    rules: Callable[[], list[SelectionRule]]
+    transform: Transform
+    world: WorldParams
+    outlines: OutlineParams
+
+
 # ── Render configs ────────────────────────────────────────────────────
 
-CONFIGS = {
+CONFIGS: dict[str, RenderConfig] = {
     # 1. Classic Goodsell — the iconic style
     "01_classic_goodsell": {
         "rules": _classic_goodsell,

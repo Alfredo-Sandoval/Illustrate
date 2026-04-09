@@ -9,13 +9,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+from typing import Any
 from urllib import parse, request
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+
+from illustrate_web.api.deps import RateLimitExceeded, enforce_rate_limit
 
 router = APIRouter(prefix="/api")
 _EM_TAG_RE = re.compile(r"</?em>", re.IGNORECASE)
+
+
+def _suggest_timeout_seconds() -> float:
+    raw = os.environ.get("ILLUSTRATE_RCSB_SUGGEST_TIMEOUT_SECONDS")
+    if raw is None or raw.strip() == "":
+        return 7.0
+    value = float(raw)
+    if value <= 0.0:
+        raise ValueError("ILLUSTRATE_RCSB_SUGGEST_TIMEOUT_SECONDS must be > 0")
+    return value
 
 
 def _http_json(
@@ -23,14 +37,14 @@ def _http_json(
     *,
     method: str = "GET",
     body: dict[str, object] | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     headers: dict[str, str] = {}
     data: bytes | None = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = request.Request(url=url, data=data, method=method, headers=headers)
-    with request.urlopen(req, timeout=7) as resp:  # nosec B310 - fixed HTTPS host
+    with request.urlopen(req, timeout=_suggest_timeout_seconds()) as resp:  # nosec B310 - fixed HTTPS host
         payload = resp.read().decode("utf-8")
     parsed = json.loads(payload)
     if isinstance(parsed, dict):
@@ -57,12 +71,11 @@ def _suggest_ids(query: str) -> list[str]:
     try:
         term_url = "https://search.rcsb.org/rcsbsearch/v2/suggest?json=" + parse.quote(json.dumps(term_payload))
         term_data = _http_json(term_url)
-        term_list = (
-            term_data.get("suggestions", {})
-            .get("rcsb_entry_container_identifiers.entry_id", [])
-            if isinstance(term_data.get("suggestions"), dict)
-            else []
-        )
+        suggestions = term_data.get("suggestions")
+        if isinstance(suggestions, dict):
+            term_list = suggestions.get("rcsb_entry_container_identifiers.entry_id", [])
+        else:
+            term_list = []
         if isinstance(term_list, list):
             for entry in term_list:
                 if not isinstance(entry, dict):
@@ -121,10 +134,10 @@ def _lookup_titles(ids: list[str]) -> dict[str, str]:
     except Exception:
         return {}
 
-    data_node = gql_data.get("data", {})
+    data_node = gql_data.get("data")
     if not isinstance(data_node, dict):
         return {}
-    entries = data_node.get("entries", [])
+    entries = data_node.get("entries")
     if not isinstance(entries, list):
         return {}
 
@@ -151,8 +164,18 @@ def _suggest_pdb(query: str) -> list[dict[str, str]]:
 
 @router.get("/pdb-suggest")
 async def suggest_pdb(
+    request: Request,
     q: str = Query(min_length=2, max_length=64),
 ) -> list[dict[str, str]]:
+    try:
+        enforce_rate_limit("suggest", client_host=request.client.host if request.client is not None else None)
+    except RateLimitExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+
     query = q.strip()
     if len(query) < 2:
         return []

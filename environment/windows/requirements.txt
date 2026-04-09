@@ -14,6 +14,7 @@ mkdocs-material
 mkdocstrings[python]
 pymdown-extensions
 pytest
+pytest-cov
 ruff
 ty
 mlx; platform_system == "Darwin" and platform_machine == "arm64"

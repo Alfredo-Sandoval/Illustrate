@@ -39,6 +39,7 @@ def test_render_empty_after_radius_zero_filter(tmp_path: Path) -> None:
     )
 
     program = parse_command_stream(command_stream)
+    assert program.pdb_file is not None
     atoms = read_and_classify_atoms(tmp_path / program.pdb_file, program.selection_rules)
     result = render(program, atoms)
 
@@ -72,6 +73,7 @@ def test_autosize_with_negative_frame_values(tmp_path: Path) -> None:
     )
 
     program = parse_command_stream(command_stream)
+    assert program.pdb_file is not None
     atoms = read_and_classify_atoms(tmp_path / program.pdb_file, program.selection_rules)
     result = render(program, atoms)
 

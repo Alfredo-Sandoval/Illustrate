@@ -43,6 +43,7 @@ def test_biomt_chain_filtering_keeps_only_whitelisted_chain(tmp_path: Path) -> N
         ],
     )
     program = parse_command_stream(stream)
+    assert program.pdb_file is not None
     atoms = read_and_classify_atoms(tmp_path / program.pdb_file, program.selection_rules)
 
     assert atoms.n == 1

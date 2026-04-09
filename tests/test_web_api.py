@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import importlib
 from io import BytesIO
+import os
+import time
+from typing import Generator
 
 from fastapi.testclient import TestClient
 from PIL import Image as PILImage
+import pytest
 
 from illustrate_web.api import deps
 from illustrate_web.api.main import app
@@ -32,6 +37,15 @@ def _cleanup_upload(pdb_id: str) -> None:
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _reset_api_rate_limits() -> Generator[None, None, None]:
+    with deps._RATE_LIMIT_LOCK:
+        deps._RATE_LIMIT_STATE.clear()
+    yield
+    with deps._RATE_LIMIT_LOCK:
+        deps._RATE_LIMIT_STATE.clear()
 
 
 def test_health_ok() -> None:
@@ -126,6 +140,18 @@ def test_upload_pdb_writes_file_to_upload_root() -> None:
     assert len(found) == 1
     assert found[0].name.startswith(f"{pdb_id}.")
     _cleanup_upload(pdb_id)
+
+
+def test_upload_pdb_rejects_payloads_over_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ILLUSTRATE_API_UPLOAD_MAX_BYTES", "16")
+
+    response = client.post(
+        "/api/upload-pdb",
+        files={"file": ("mini.pdb", "x" * 17, "text/plain")},
+    )
+
+    assert response.status_code == 413
+    assert "uploaded file exceeds" in response.json()["detail"]
 
 
 def test_render_unknown_pdb_id_returns_400() -> None:
@@ -447,3 +473,122 @@ def test_render_reuses_cached_atoms_for_identical_rules(monkeypatch) -> None:
         with render_route._ATOM_CACHE_LOCK:
             render_route._ATOM_CACHE.clear()
         _cleanup_upload(pdb_id)
+
+
+def test_render_reloads_cached_atoms_when_upload_changes(monkeypatch) -> None:
+    pdb_id = _upload_minimal_pdb()
+    try:
+        with render_route._ATOM_CACHE_LOCK:
+            render_route._ATOM_CACHE.clear()
+
+        calls = {"count": 0}
+        real_load_pdb = render_route._load_pdb
+
+        def counting_load_pdb(pdb_path: str, rules):
+            calls["count"] += 1
+            return real_load_pdb(pdb_path, rules)
+
+        monkeypatch.setattr(render_route, "_load_pdb", counting_load_pdb)
+
+        render_payload = {
+            "pdb_id": pdb_id,
+            "rules": [
+                {
+                    "record_name": "ATOM",
+                    "descriptor": "----------",
+                    "res_low": 0,
+                    "res_high": 9999,
+                    "color": [1.0, 0.2, 0.2],
+                    "radius": 1.5,
+                },
+            ],
+            "world": {
+                "width": 20,
+                "height": 20,
+            },
+            "transform": {
+                "scale": 12.0,
+            },
+            "output_format": "png",
+        }
+
+        response_one = client.post("/api/render", json=render_payload)
+        assert response_one.status_code == 200
+
+        upload_path = deps.get_upload_path(pdb_id)
+        upload_path.write_text(
+            (
+                f"{'ATOM':<6}{1:5d} {'CA':<4}{' ':1}{'GLY':>3} {'A':1}{1:4d}    "
+                f"{0.000:8.3f}{0.000:8.3f}{-6.000:8.3f}\nEND\n"
+            ),
+            encoding="utf-8",
+        )
+
+        response_two = client.post("/api/render", json=render_payload)
+        assert response_two.status_code == 200
+        assert calls["count"] == 2
+    finally:
+        with render_route._ATOM_CACHE_LOCK:
+            render_route._ATOM_CACHE.clear()
+        _cleanup_upload(pdb_id)
+
+
+def test_upload_cleanup_prunes_expired_files(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(deps, "_UPLOAD_ROOT", tmp_path)
+    monkeypatch.setenv("ILLUSTRATE_UPLOAD_TTL_SECONDS", "1")
+
+    expired = tmp_path / ("a" * 32 + ".pdb")
+    expired.write_bytes(b"old")
+    stale_time = time.time() - 10.0
+    os.utime(expired, (stale_time, stale_time))
+
+    new_id = deps.register_upload(b"fresh", ".pdb")
+
+    assert not expired.exists()
+    assert len(list(tmp_path.glob(f"{new_id}*"))) == 1
+
+
+def test_render_rate_limit_returns_429(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ILLUSTRATE_API_RENDER_RATE_LIMIT", "1")
+    monkeypatch.setenv("ILLUSTRATE_API_RENDER_RATE_WINDOW_SECONDS", "60")
+
+    pdb_id = _upload_minimal_pdb()
+    try:
+        render_payload = {
+            "pdb_id": pdb_id,
+            "rules": [
+                {
+                    "record_name": "ATOM",
+                    "descriptor": "----------",
+                    "res_low": 0,
+                    "res_high": 9999,
+                    "color": [1.0, 0.2, 0.2],
+                    "radius": 1.5,
+                },
+            ],
+            "world": {
+                "width": 20,
+                "height": 20,
+            },
+            "output_format": "png",
+        }
+
+        first = client.post("/api/render", json=render_payload)
+        second = client.post("/api/render", json=render_payload)
+
+        assert first.status_code == 200
+        assert second.status_code == 429
+        assert "rate limit exceeded" in second.json()["detail"]
+        assert int(second.headers["retry-after"]) >= 1
+    finally:
+        _cleanup_upload(pdb_id)
+
+
+def test_timeout_helpers_read_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    fetch_module = importlib.import_module("illustrate.fetch")
+
+    monkeypatch.setenv("ILLUSTRATE_RCSB_FETCH_TIMEOUT_SECONDS", "12.5")
+    monkeypatch.setenv("ILLUSTRATE_RCSB_SUGGEST_TIMEOUT_SECONDS", "3.5")
+
+    assert fetch_module._fetch_timeout_seconds() == 12.5
+    assert suggest_route._suggest_timeout_seconds() == 3.5

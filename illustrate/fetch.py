@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -10,6 +11,16 @@ from urllib.request import urlopen
 _RCSB_URL = "https://files.rcsb.org/download/{pdb_id}.pdb"
 _CACHE_DIR = Path.home() / ".cache" / "illustrate"
 _PDB_ID_RE = re.compile(r"^[A-Za-z0-9]{4}$")
+
+
+def _fetch_timeout_seconds() -> float:
+    raw = os.environ.get("ILLUSTRATE_RCSB_FETCH_TIMEOUT_SECONDS")
+    if raw is None or raw.strip() == "":
+        return 30.0
+    value = float(raw)
+    if value <= 0.0:
+        raise ValueError("ILLUSTRATE_RCSB_FETCH_TIMEOUT_SECONDS must be > 0")
+    return value
 
 
 def fetch_pdb(pdb_id: str) -> Path:
@@ -49,7 +60,7 @@ def fetch_pdb(pdb_id: str) -> Path:
 
     url = _RCSB_URL.format(pdb_id=pdb_id_upper)
     try:
-        with urlopen(url, timeout=30) as resp:  # noqa: S310
+        with urlopen(url, timeout=_fetch_timeout_seconds()) as resp:  # noqa: S310
             data = resp.read()
     except HTTPError as exc:
         if exc.code == 404:

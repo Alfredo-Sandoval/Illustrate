@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import lru_cache
+import importlib
 import importlib.util
+import subprocess
+import sys
+from typing import Any
 
 import numpy as np
+
+_OPTIONAL_IMPORT_PROBE_TIMEOUT_SECONDS = 5.0
+_OPTIONAL_IMPORT_PROBE = "import importlib, sys; importlib.import_module(sys.argv[1])"
 
 
 def _module_spec_exists(module_name: str) -> bool:
@@ -13,6 +21,52 @@ def _module_spec_exists(module_name: str) -> bool:
     except Exception:
         # find_spec("pkg.submodule") raises when parent package is absent.
         return False
+
+
+@lru_cache(maxsize=None)
+def _module_import_succeeds(module_name: str) -> bool:
+    """Probe optional modules in a subprocess so broken installs cannot abort us."""
+    if not _module_spec_exists(module_name):
+        return False
+
+    executable = sys.executable.strip()
+    if executable == "":
+        return False
+
+    try:
+        completed = subprocess.run(
+            [executable, "-c", _OPTIONAL_IMPORT_PROBE, module_name],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_OPTIONAL_IMPORT_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+    return completed.returncode == 0
+
+
+def _clear_optional_module_probe_cache() -> None:
+    _module_import_succeeds.cache_clear()
+
+
+def _require_optional_module(module_name: str, error_message: str) -> Any:
+    if not _module_import_succeeds(module_name):
+        raise RuntimeError(error_message)
+
+    try:
+        return importlib.import_module(module_name)
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise RuntimeError(error_message) from exc
+
+
+def _require_cupy() -> Any:
+    return _require_optional_module("cupy", "CuPy backend requested but CuPy is unavailable")
+
+
+def _require_mlx() -> Any:
+    return _require_optional_module("mlx.core", "MLX backend requested but MLX is unavailable")
 
 
 def _raster_chunk_numpy(
@@ -71,14 +125,11 @@ def _raster_chunk_cupy(
     fiy: float,
     nv: int,
     ibio: int,
-    zpix: object,
-    atom_buf: object,
-    bio_buf: object,
-) -> tuple[object, object, object]:
-    try:
-        import cupy as cp
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError("CuPy backend requested but CuPy is unavailable") from exc
+    zpix: Any,
+    atom_buf: Any,
+    bio_buf: Any,
+) -> tuple[Any, Any, Any]:
+    cp = _require_cupy()
 
     zpix_gpu = cp.asarray(zpix)
     atom_buf_gpu = cp.asarray(atom_buf)
@@ -129,14 +180,11 @@ def _raster_chunk_mlx(
     fiy: float,
     nv: int,
     ibio: int,
-    zpix: object,
-    atom_buf: object,
-    bio_buf: object,
-) -> tuple[object, object, object]:
-    try:
-        import mlx.core as mx
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError("MLX backend requested but MLX is unavailable") from exc
+    zpix: Any,
+    atom_buf: Any,
+    bio_buf: Any,
+) -> tuple[Any, Any, Any]:
+    mx = _require_mlx()
 
     del fix, fiy
 
@@ -260,17 +308,14 @@ def _shadow_cone_numpy(
 
 def _shadow_cone_cupy(
     *,
-    zpix: object,
-    atom_buf: object,
+    zpix: Any,
+    atom_buf: Any,
     shadow_strength: float,
     shadow_angle: float,
     shadow_min_z: float,
     shadow_max_dark: float,
 ):
-    try:
-        import cupy as cp
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError("CuPy backend requested but CuPy is unavailable") from exc
+    cp = _require_cupy()
 
     zpix_gpu = cp.asarray(zpix)
     atom_gpu = cp.asarray(atom_buf)
@@ -304,26 +349,23 @@ def _shadow_cone_cupy(
 
 def _shadow_cone_mlx(
     *,
-    zpix: object,
-    atom_buf: object,
+    zpix: Any,
+    atom_buf: Any,
     shadow_strength: float,
     shadow_angle: float,
     shadow_min_z: float,
     shadow_max_dark: float,
 ):
-    try:
-        import mlx.core as mx
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError("MLX backend requested but MLX is unavailable") from exc
+    mx = _require_mlx()
 
     zpix_mx = zpix if isinstance(zpix, mx.array) else mx.array(zpix)
     atom_mx = atom_buf if isinstance(atom_buf, mx.array) else mx.array(atom_buf)
-    has_atom = atom_mx != 0
+    has_atom: Any = atom_mx != 0
     pconetot = mx.ones(zpix_mx.shape, dtype=mx.float32)
     shadow_pad = 50
     zpix_shadow_padded = mx.pad(
         zpix_mx,
-        ((shadow_pad, shadow_pad), (shadow_pad, shadow_pad)),
+        [(shadow_pad, shadow_pad), (shadow_pad, shadow_pad)],
         mode="constant",
         constant_values=-100000.0,
     )
@@ -345,7 +387,7 @@ def _shadow_cone_mlx(
         )
         rzdiff = shifted_z - zpix_mx[None, :, :]
         radii = mx.array(np.array([radius for _di, _dj, radius in chunk], dtype=np.float32))[:, None, None]
-        shadow_mask = has_atom[None, :, :] & (rzdiff > min_z) & ((radii * angle) < (rzdiff + min_z))
+        shadow_mask: Any = has_atom[None, :, :] & (rzdiff > min_z) & ((radii * angle) < (rzdiff + min_z))
         count = count + mx.sum(shadow_mask.astype(mx.int32), axis=0)
 
     pconetot = np.float32(1.0) - count.astype(mx.float32) * strength
@@ -440,9 +482,9 @@ def _outline_kernel34_numpy(
 
 def _outline_kernel34_cupy(
     *,
-    zpix: object,
-    atom_buf: object,
-    bio_buf: object,
+    zpix: Any,
+    atom_buf: Any,
+    bio_buf: Any,
     su_lookup: np.ndarray,
     res_lookup: np.ndarray,
     residue_diff: float,
@@ -456,10 +498,7 @@ def _outline_kernel34_cupy(
     contour_high: float,
     kernel: int,
 ):
-    try:
-        import cupy as cp
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError("CuPy backend requested but CuPy is unavailable") from exc
+    cp = _require_cupy()
 
     zpix_gpu = cp.asarray(zpix)
     atom_gpu = cp.asarray(atom_buf)
@@ -535,9 +574,9 @@ def _outline_kernel34_cupy(
 
 def _outline_kernel34_mlx(
     *,
-    zpix: object,
-    atom_buf: object,
-    bio_buf: object,
+    zpix: Any,
+    atom_buf: Any,
+    bio_buf: Any,
     su_lookup: np.ndarray,
     res_lookup: np.ndarray,
     residue_diff: float,
@@ -551,10 +590,7 @@ def _outline_kernel34_mlx(
     contour_high: float,
     kernel: int,
 ):
-    try:
-        import mlx.core as mx
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError("MLX backend requested but MLX is unavailable") from exc
+    mx = _require_mlx()
 
     zpix_mx = zpix if isinstance(zpix, mx.array) else mx.array(zpix)
     atom_mx = atom_buf if isinstance(atom_buf, mx.array) else mx.array(atom_buf)
@@ -569,9 +605,9 @@ def _outline_kernel34_mlx(
     r_count = mx.zeros((height, width), dtype=mx.float32)
     g_count = mx.zeros((height, width), dtype=mx.float32)
     rg_pad = 2
-    su_padded = mx.pad(su_map, ((rg_pad, rg_pad), (rg_pad, rg_pad)), mode="constant", constant_values=9999)
-    bio_padded = mx.pad(bio_mx, ((rg_pad, rg_pad), (rg_pad, rg_pad)), mode="constant", constant_values=0)
-    res_padded = mx.pad(res_map, ((rg_pad, rg_pad), (rg_pad, rg_pad)), mode="constant", constant_values=9999)
+    su_padded = mx.pad(su_map, [(rg_pad, rg_pad), (rg_pad, rg_pad)], mode="constant", constant_values=9999)
+    bio_padded = mx.pad(bio_mx, [(rg_pad, rg_pad), (rg_pad, rg_pad)], mode="constant", constant_values=0)
+    res_padded = mx.pad(res_map, [(rg_pad, rg_pad), (rg_pad, rg_pad)], mode="constant", constant_values=9999)
     res_map_f = res_map.astype(mx.float32)
     residue_diff_f = np.float32(residue_diff)
 
@@ -581,7 +617,8 @@ def _outline_kernel34_mlx(
         shifted_su = su_padded[i0 : i0 + height, j0 : j0 + width]
         shifted_bio = bio_padded[i0 : i0 + height, j0 : j0 + width]
         shifted_res = res_padded[i0 : i0 + height, j0 : j0 + width]
-        r_count = r_count + ((su_map != shifted_su) | (bio_mx != shifted_bio)).astype(mx.float32)
+        r_mask: Any = (su_map != shifted_su) | (bio_mx != shifted_bio)
+        r_count = r_count + r_mask.astype(mx.float32)
         g_count = g_count + (mx.abs(res_map_f - shifted_res.astype(mx.float32)) > residue_diff_f).astype(mx.float32)
 
     if residue_high != residue_low:
@@ -595,12 +632,12 @@ def _outline_kernel34_mlx(
     g_opacity = mx.maximum(g_opacity, r_opacity)
     rows = mx.arange(height)[:, None]
     cols = mx.arange(width)[None, :]
-    g_edge_mask = (rows == 0) | (rows == (height - 1)) | (cols == 0) | (cols == (width - 1))
+    g_edge_mask: Any = (rows == 0) | (rows == (height - 1)) | (cols == 0) | (cols == (width - 1))
     g_opacity = mx.where(g_edge_mask, np.float32(0.0), g_opacity)
 
     offsets_k = _KERNEL3_OFFSETS if kernel == 3 else _KERNEL4_OFFSETS
     zpad = 2
-    zpix_padded = mx.pad(zpix_mx, ((zpad, zpad), (zpad, zpad)), mode="constant", constant_values=0.0)
+    zpix_padded = mx.pad(zpix_mx, [(zpad, zpad), (zpad, zpad)], mode="constant", constant_values=0.0)
     l_total = mx.zeros((height, width), dtype=mx.float32)
     denom = float(z_diff_max - z_diff_min)
     z_diff_min_f = np.float32(z_diff_min)
@@ -800,10 +837,10 @@ def _composite_numpy(
 
 def _composite_cupy(
     *,
-    zpix: object,
-    atom_buf: object,
-    pconetot: object,
-    l_opacity: object,
+    zpix: Any,
+    atom_buf: Any,
+    pconetot: Any,
+    l_opacity: Any,
     type_lookup: np.ndarray,
     colortype: np.ndarray,
     fog_color: np.ndarray,
@@ -811,10 +848,7 @@ def _composite_cupy(
     fog_back: float,
     zbuf_bg: float,
 ):
-    try:
-        import cupy as cp
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError("CuPy backend requested but CuPy is unavailable") from exc
+    cp = _require_cupy()
 
     zpix_gpu = cp.asarray(zpix)
     atom_gpu = cp.asarray(atom_buf, dtype=cp.int32)
@@ -850,10 +884,10 @@ def _composite_cupy(
 
 def _composite_mlx(
     *,
-    zpix: object,
-    atom_buf: object,
-    pconetot: object,
-    l_opacity: object,
+    zpix: Any,
+    atom_buf: Any,
+    pconetot: Any,
+    l_opacity: Any,
     type_lookup: np.ndarray,
     colortype: np.ndarray,
     fog_color: np.ndarray,
@@ -861,10 +895,7 @@ def _composite_mlx(
     fog_back: float,
     zbuf_bg: float,
 ):
-    try:
-        import mlx.core as mx
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError("MLX backend requested but MLX is unavailable") from exc
+    mx = _require_mlx()
 
     zpix_mx = zpix if isinstance(zpix, mx.array) else mx.array(zpix)
     atom_mx = atom_buf if isinstance(atom_buf, mx.array) else mx.array(atom_buf)
@@ -875,7 +906,7 @@ def _composite_mlx(
     fog_color_mx = mx.array(fog_color)
 
     zpix_max = mx.minimum(mx.max(zpix_mx), np.float32(0.0))
-    mol_mask = zpix_mx != np.float32(zbuf_bg)
+    mol_mask: Any = zpix_mx != np.float32(zbuf_bg)
     if int(mx.sum(mol_mask.astype(mx.int32)).item()) > 0:
         zpix_min = mx.min(mx.where(mol_mask, zpix_mx, np.float32(100000.0)))
     else:
@@ -1061,7 +1092,7 @@ def backend_available(backend: str) -> bool:
     if name == "numpy":
         return True
     if name == "cupy":
-        return _module_spec_exists("cupy")
+        return _module_import_succeeds("cupy")
     if name == "mlx":
-        return _module_spec_exists("mlx.core")
+        return _module_import_succeeds("mlx.core")
     return False

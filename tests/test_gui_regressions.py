@@ -98,6 +98,126 @@ def test_mainwindow_close_event_waits_for_running_render_worker() -> None:
     assert "WAITED True" in output
 
 
+def test_mainwindow_close_event_waits_for_running_fetch_worker() -> None:
+    output = _run_gui_script(
+        """
+        from PySide6.QtGui import QCloseEvent
+        from PySide6.QtWidgets import QApplication
+        from illustrate_gui.app import MainWindow
+
+        app = QApplication([])
+        win = MainWindow()
+        waited = {"called": False}
+
+        class DummyFetchWorker:
+            def isRunning(self):
+                return True
+            def wait(self):
+                waited["called"] = True
+
+        win.fetch_worker = DummyFetchWorker()
+        win.closeEvent(QCloseEvent())
+        print("WAITED", waited["called"])
+        """
+    )
+    assert "WAITED True" in output
+
+
+def test_mainwindow_close_event_waits_for_running_load_worker() -> None:
+    output = _run_gui_script(
+        """
+        from PySide6.QtGui import QCloseEvent
+        from PySide6.QtWidgets import QApplication
+        from illustrate_gui.app import MainWindow
+
+        app = QApplication([])
+        win = MainWindow()
+        waited = {"called": False}
+
+        class DummyLoadWorker:
+            def isRunning(self):
+                return True
+            def wait(self):
+                waited["called"] = True
+
+        win.load_worker = DummyLoadWorker()
+        win.closeEvent(QCloseEvent())
+        print("WAITED", waited["called"])
+        """
+    )
+    assert "WAITED True" in output
+
+
+def test_activate_loaded_structure_queues_async_atom_load() -> None:
+    output = _run_gui_script(
+        """
+        from types import SimpleNamespace
+        from PySide6.QtGui import QCloseEvent
+        from PySide6.QtWidgets import QApplication
+        import illustrate_gui.app as app_module
+        from illustrate_gui.worker import LoadJobResult
+
+        app = QApplication([])
+        orig_apply_preset = app_module.MainWindow._apply_preset
+        app_module.MainWindow._apply_preset = lambda self, _index: None
+        try:
+            win = app_module.MainWindow()
+            win._structure_flow._atom_loader = lambda *_args: (_ for _ in ()).throw(AssertionError("sync load called"))
+
+            rendered = []
+
+            class DummyLoadWorker:
+                def __init__(self):
+                    self.requests = []
+                def submit(self, request):
+                    self.requests.append(request)
+                def isRunning(self):
+                    return False
+                def wait(self):
+                    return None
+
+            win.load_worker = DummyLoadWorker()
+            win._render = lambda *args, **kwargs: rendered.append((args, kwargs))
+            win._push_preview_scene = lambda: None
+            win._update_rule_match_counts = lambda: None
+            win._schedule_render_dimensions_update = lambda: None
+            win._sync_render_size_controls = lambda: None
+            win._sync_preview_transform = lambda: None
+            win._sync_preview_style = lambda: None
+            win._set_loaded_model_label = lambda _path: None
+            win._clear_last_result = lambda: None
+            win._clear_interactive_preview = lambda: None
+            win.viewport.set_preview_scene = lambda *args, **kwargs: None
+            win.setWindowTitle = lambda *args, **kwargs: None
+
+            win._structure_flow.activate_loaded_structure(
+                path="/tmp/example.pdb",
+                title_name="example.pdb",
+                status_message="Loaded example.pdb. Click Render.",
+                render_after_load=True,
+            )
+
+            print("SUBMIT_COUNT", len(win.load_worker.requests))
+            print("RENDER_BEFORE_LOAD", len(rendered))
+
+            payload = LoadJobResult(
+                request_id=win._latest_load_request_id,
+                rules_signature=app_module._rules_signature(win._current_rules()),
+                render_after_load=True,
+                atoms=SimpleNamespace(n=0),
+            )
+            win._on_atoms_loaded(payload)
+            print("RENDER_AFTER_LOAD", len(rendered))
+            win.closeEvent(QCloseEvent())
+        finally:
+            app_module.MainWindow._apply_preset = orig_apply_preset
+        """
+    )
+    assert "SUBMIT_COUNT 1" in output
+    assert "RENDER_BEFORE_LOAD 0" in output
+    assert "RENDER_AFTER_LOAD 1" in output
+
+
 def test_collapsible_section_toggle_shows_state_arrows() -> None:
     output = _run_gui_script(
         """
@@ -246,7 +366,7 @@ def test_render_worker_emits_request_id_payload_for_preview_jobs() -> None:
         """
         from PySide6.QtCore import QEventLoop, QTimer
         from PySide6.QtWidgets import QApplication
-        from illustrate_gui.worker import RenderRequest, RenderWorker
+        from illustrate_gui.worker import RenderJobResult, RenderRequest, RenderWorker
         import illustrate_gui.worker as worker_module
 
         app = QApplication([])
@@ -267,12 +387,106 @@ def test_render_worker_emits_request_id_payload_for_preview_jobs() -> None:
 
             if worker.isRunning():
                 worker.wait()
-            print("DONE", done)
+            print("DONE_LEN", len(done))
+            print("DONE_TYPE", type(done[0]).__name__)
+            print("DONE_FIELDS", done[0].request_id, done[0].interactive, done[0].result)
         finally:
             worker_module.render_from_atoms = orig
         """
     )
-    assert "DONE [(17, 'preview')]" in output
+    assert "DONE_LEN 1" in output
+    assert "DONE_TYPE RenderJobResult" in output
+    assert "DONE_FIELDS 17 False preview" in output
+
+
+def test_render_done_ignores_stale_full_render_results() -> None:
+    output = _run_gui_script(
+        """
+        from types import SimpleNamespace
+        import numpy as np
+        from PySide6.QtGui import QCloseEvent
+        from PySide6.QtWidgets import QApplication
+        import illustrate_gui.app as app_module
+        from illustrate_gui.worker import RenderJobResult
+
+        app = QApplication([])
+        orig_apply_preset = app_module.MainWindow._apply_preset
+        app_module.MainWindow._apply_preset = lambda self, _index: None
+        try:
+            win = app_module.MainWindow()
+            displayed = []
+
+            win._display_image = lambda rgb, opacity: displayed.append(
+                (tuple(rgb.shape), None if opacity is None else tuple(opacity.shape))
+            )
+            win._clear_interactive_preview = lambda: None
+            win._schedule_render_dimensions_update = lambda: None
+            win._set_render_busy = lambda _busy: None
+            win._render_elapsed_suffix = lambda: ""
+
+            result = SimpleNamespace(
+                rgb=np.zeros((2, 2, 3), dtype=np.uint8),
+                opacity=np.zeros((2, 2), dtype=np.uint8),
+                width=2,
+                height=2,
+            )
+
+            win._render_request_id = 2
+            win._on_render_done(RenderJobResult(request_id=1, interactive=False, result=result))
+            print("DISPLAYED_AFTER_STALE", len(displayed))
+            win._on_render_done(RenderJobResult(request_id=2, interactive=False, result=result))
+            print("DISPLAYED_AFTER_CURRENT", len(displayed))
+            win.closeEvent(QCloseEvent())
+        finally:
+            app_module.MainWindow._apply_preset = orig_apply_preset
+        """
+    )
+    assert "DISPLAYED_AFTER_STALE 0" in output
+    assert "DISPLAYED_AFTER_CURRENT 1" in output
+
+
+def test_render_interactive_submits_positive_request_id_with_explicit_flag() -> None:
+    output = _run_gui_script(
+        """
+        from types import SimpleNamespace
+        from PySide6.QtGui import QCloseEvent
+        from PySide6.QtWidgets import QApplication
+        import illustrate_gui.app as app_module
+
+        app = QApplication([])
+        orig_apply_preset = app_module.MainWindow._apply_preset
+        app_module.MainWindow._apply_preset = lambda self, _index: None
+        try:
+            win = app_module.MainWindow()
+            captured = {}
+
+            class DummyWorker:
+                def submit(self, request):
+                    captured["request_id"] = request.request_id
+                    captured["interactive"] = request.interactive
+                def isRunning(self):
+                    return False
+                def wait(self):
+                    return None
+
+            win.pdb_path = "dummy.pdb"
+            win._atoms = SimpleNamespace(n=1)
+            win.worker = DummyWorker()
+            win._load_atoms_if_needed = lambda: None
+            win._build_interactive_rerender_params = lambda: app_module.RenderParams(
+                pdb_path="dummy.pdb",
+                rules=[],
+            )
+            win._render(interactive=True)
+            print("REQUEST_ID_POSITIVE", captured["request_id"] > 0)
+            print("INTERACTIVE_FLAG", captured["interactive"])
+            win.closeEvent(QCloseEvent())
+        finally:
+            app_module.MainWindow._apply_preset = orig_apply_preset
+        """
+    )
+    assert "REQUEST_ID_POSITIVE True" in output
+    assert "INTERACTIVE_FLAG True" in output
 
 
 def test_viewport_uses_raster_fallback_in_offscreen_mode() -> None:
