@@ -330,7 +330,7 @@ def test_render_worker_coalesces_rapid_submissions() -> None:
         app = QApplication([])
 
         orig = worker_module.render_from_atoms
-        def fake(_atoms, params):
+        def fake(_atoms, params, *, backend=None):
             time.sleep(0.12)
             return params
         worker_module.render_from_atoms = fake
@@ -372,7 +372,7 @@ def test_render_worker_emits_request_id_payload_for_preview_jobs() -> None:
         app = QApplication([])
 
         orig = worker_module.render_from_atoms
-        def fake(_atoms, params):
+        def fake(_atoms, params, *, backend=None):
             return params
         worker_module.render_from_atoms = fake
         try:
@@ -397,6 +397,45 @@ def test_render_worker_emits_request_id_payload_for_preview_jobs() -> None:
     assert "DONE_LEN 1" in output
     assert "DONE_TYPE RenderJobResult" in output
     assert "DONE_FIELDS 17 False preview" in output
+
+
+def test_render_worker_passes_forced_backend_to_renderer() -> None:
+    output = _run_gui_script(
+        """
+        from PySide6.QtCore import QEventLoop, QTimer
+        from PySide6.QtWidgets import QApplication
+        from illustrate_gui.worker import RenderRequest, RenderWorker
+        import illustrate_gui.worker as worker_module
+
+        app = QApplication([])
+
+        orig_render = worker_module.render_from_atoms
+        orig_backend = worker_module._desktop_render_backend
+        def fake(_atoms, params, *, backend=None):
+            print("BACKEND", backend)
+            return params
+        worker_module.render_from_atoms = fake
+        worker_module._desktop_render_backend = lambda: "mlx"
+        try:
+            worker = RenderWorker()
+            done = []
+            worker.finished.connect(done.append)
+            worker.submit(RenderRequest(params="preview", atoms=object()))
+
+            loop = QEventLoop()
+            QTimer.singleShot(350, loop.quit)
+            loop.exec()
+
+            if worker.isRunning():
+                worker.wait()
+            print("DONE_LEN", len(done))
+        finally:
+            worker_module.render_from_atoms = orig_render
+            worker_module._desktop_render_backend = orig_backend
+        """
+    )
+    assert "BACKEND mlx" in output
+    assert "DONE_LEN 1" in output
 
 
 def test_render_done_ignores_stale_full_render_results() -> None:

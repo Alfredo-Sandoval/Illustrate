@@ -5,6 +5,8 @@ from collections.abc import Sequence
 import json
 import math
 import os
+import platform
+import sys
 import threading
 from dataclasses import asdict
 from pathlib import Path
@@ -33,6 +35,40 @@ _SPHERE_CACHE: OrderedDict[int, np.ndarray] = OrderedDict()
 _SPHERE_CACHE_LOCK = threading.Lock()
 
 
+def _host_platform_backend_candidates(
+    *,
+    platform_name: str | None = None,
+    machine_name: str | None = None,
+) -> tuple[str, ...]:
+    platform_value = sys.platform if platform_name is None else str(platform_name)
+    machine_value = platform.machine() if machine_name is None else str(machine_name)
+
+    normalized_platform = platform_value.strip().lower()
+    normalized_machine = machine_value.strip().lower()
+
+    if normalized_platform == "darwin":
+        if normalized_machine in {"arm64", "aarch64"}:
+            return ("mlx", "numpy")
+        return ("numpy",)
+
+    if normalized_platform.startswith("linux") or normalized_platform == "win32":
+        return ("cupy", "numpy")
+
+    return ("numpy",)
+
+
+def _default_render_backend() -> str:
+    supported = tuple(supported_backends())
+    candidates = _host_platform_backend_candidates()
+    for candidate in candidates:
+        if candidate in supported and backend_available(candidate):
+            return candidate
+
+    candidate_text = ", ".join(candidates)
+    host_text = f"{sys.platform}/{platform.machine()}"
+    raise RuntimeError(f"No available render backend found for {host_text}. Tried: {candidate_text}")
+
+
 def _resolve_render_backend(backend: str | None) -> str:
     supported = tuple(supported_backends())
 
@@ -50,11 +86,7 @@ def _resolve_render_backend(backend: str | None) -> str:
             raise ValueError(f"Unsupported render backend: {explicit_raw!r}")
         return normalized
 
-    for candidate in ("mlx", "cupy", "numpy"):
-        if candidate in supported and backend_available(candidate):
-            return candidate
-
-    raise RuntimeError("No available render backend found")
+    return _default_render_backend()
 
 
 def _precompute_sphere(scaled_radius: float) -> np.ndarray:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import platform
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -9,6 +11,12 @@ from typing import Any, Callable
 from illustrate import AtomTable, RenderParams, RenderResult, render_from_atoms
 from illustrate.fetch import fetch_pdb
 from illustrate.pdb import load_pdb
+
+
+def _desktop_render_backend() -> str | None:
+    if sys.platform == "darwin" and platform.machine().strip().lower() in {"arm64", "aarch64"}:
+        return "mlx"
+    return None
 
 
 @dataclass
@@ -90,7 +98,11 @@ if not _HAS_QT_THREAD:
 
         def start(self, request: RenderRequest) -> None:
             try:
-                result = render_from_atoms(request.atoms, request.params)
+                result = render_from_atoms(
+                    request.atoms,
+                    request.params,
+                    backend=_desktop_render_backend(),
+                )
             except Exception as exc:  # pragma: no cover - depends on input validity
                 if request.request_id != 0:
                     self.failed.emit(
@@ -189,7 +201,11 @@ else:
                 if request is None:
                     return
                 try:
-                    result = render_from_atoms(request.atoms, request.params)
+                    result = render_from_atoms(
+                        request.atoms,
+                        request.params,
+                        backend=_desktop_render_backend(),
+                    )
                 except Exception as exc:
                     if request.request_id != 0:
                         self.failed.emit(

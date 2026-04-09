@@ -342,10 +342,10 @@ def _precompute_outline(scene: PreparedScene, atoms: AtomTable, buffers: Backend
             kernel=int(outlines.kernel),
         )
 
-    if outlines.kernel in (1, 2) and buffers.backend_name == "numpy":
+    if outlines.kernel in (1, 2):
         return run_outline12_kernel(
             backend=buffers.backend_name,
-            zpix=np.minimum(buffers.zpix, 0.0),
+            zpix=_outline_input(buffers.zpix, buffers),
             atom_buf=buffers.atom_buf,
             bio_buf=buffers.bio_buf,
             su_lookup=atoms.su,
@@ -396,15 +396,25 @@ def _render_precomputed_outline(
     pconetot: Any,
     precomputed_outline: Any | None,
 ) -> RenderResult | None:
-    if precomputed_outline is None:
-        return None
+    outline_opacity = precomputed_outline
+    if outline_opacity is None:
+        if scene.outlines.enabled:
+            return None
+        width = scene.layout.width
+        height = scene.layout.height
+        if buffers.cupy_mod is not None:
+            outline_opacity = buffers.cupy_mod.zeros((width, height), dtype=buffers.cupy_mod.float32)
+        elif buffers.mlx_mod is not None:
+            outline_opacity = buffers.mlx_mod.zeros((width, height), dtype=buffers.mlx_mod.float32)
+        else:
+            return None
 
     rgb_linear, alpha_linear = run_composite_kernel(
         backend=buffers.backend_name,
         zpix=buffers.zpix,
         atom_buf=buffers.atom_buf,
         pconetot=pconetot,
-        l_opacity=precomputed_outline,
+        l_opacity=outline_opacity,
         type_lookup=atoms.type_idx,
         colortype=scene.colortype,
         fog_color=scene.fog_color.astype(np.float32),

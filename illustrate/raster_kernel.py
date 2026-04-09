@@ -793,6 +793,216 @@ def _outline_kernel12_numpy(
     return np.maximum(l_opacity, g_opacity)
 
 
+def _outline_kernel12_cupy(
+    *,
+    zpix: Any,
+    atom_buf: Any,
+    bio_buf: Any,
+    su_lookup: np.ndarray,
+    res_lookup: np.ndarray,
+    residue_diff: float,
+    residue_low: float,
+    residue_high: float,
+    subunit_low: float,
+    subunit_high: float,
+    contour_low: float,
+    contour_high: float,
+    kernel: int,
+):
+    if kernel not in (1, 2):
+        raise ValueError(f"outline12 kernel expects 1 or 2, got {kernel}")
+
+    cp = _require_cupy()
+
+    zpix_gpu = cp.asarray(zpix, dtype=cp.float32)
+    atom_gpu = cp.asarray(atom_buf, dtype=cp.int32)
+    bio_gpu = cp.asarray(bio_buf, dtype=cp.int32)
+    su_lookup_gpu = cp.asarray(su_lookup, dtype=cp.int32)
+    res_lookup_gpu = cp.asarray(res_lookup, dtype=cp.int32)
+
+    height, width = zpix_gpu.shape
+    su_map = su_lookup_gpu[atom_gpu]
+    res_map = res_lookup_gpu[atom_gpu]
+    res_map_f = res_map.astype(cp.float32)
+    residue_diff_f = cp.float32(residue_diff)
+
+    r_count = cp.zeros((height, width), dtype=cp.float32)
+    g_count = cp.zeros((height, width), dtype=cp.float32)
+    rg_pad = 2
+    su_padded = cp.pad(su_map, ((rg_pad, rg_pad), (rg_pad, rg_pad)), mode="constant", constant_values=9999)
+    bio_padded = cp.pad(bio_gpu, ((rg_pad, rg_pad), (rg_pad, rg_pad)), mode="constant", constant_values=0)
+    res_padded = cp.pad(res_map, ((rg_pad, rg_pad), (rg_pad, rg_pad)), mode="constant", constant_values=9999)
+
+    for di, dj in _RG_OFFSETS:
+        i0 = rg_pad + di
+        j0 = rg_pad + dj
+        shifted_su = su_padded[i0 : i0 + height, j0 : j0 + width]
+        shifted_bio = bio_padded[i0 : i0 + height, j0 : j0 + width]
+        shifted_res = res_padded[i0 : i0 + height, j0 : j0 + width]
+        r_count = r_count + ((su_map != shifted_su) | (bio_gpu != shifted_bio)).astype(cp.float32)
+        g_count = g_count + (cp.abs(res_map_f - shifted_res.astype(cp.float32)) > residue_diff_f).astype(cp.float32)
+
+    if residue_high != residue_low:
+        g_opacity = cp.clip((g_count - residue_low) / (residue_high - residue_low), 0.0, 1.0)
+    else:
+        g_opacity = cp.zeros((height, width), dtype=cp.float32)
+    if subunit_high != subunit_low:
+        r_opacity = cp.clip((r_count - subunit_low) / (subunit_high - subunit_low), 0.0, 1.0)
+    else:
+        r_opacity = cp.zeros((height, width), dtype=cp.float32)
+    g_opacity = cp.maximum(g_opacity, r_opacity)
+    g_opacity[0, :] = 0.0
+    g_opacity[-1, :] = 0.0
+    g_opacity[:, 0] = 0.0
+    g_opacity[:, -1] = 0.0
+
+    if kernel == 1:
+        lap_offsets = _KERNEL1_LAP_OFFSETS
+        lap_weights = cp.asarray(_KERNEL1_LAP_WEIGHTS, dtype=cp.float32)
+    else:
+        lap_offsets = _KERNEL2_LAP_OFFSETS
+        lap_weights = cp.asarray(_KERNEL2_LAP_WEIGHTS, dtype=cp.float32)
+
+    zpad = 2
+    zpix_padded = cp.pad(zpix_gpu, ((zpad, zpad), (zpad, zpad)), mode="constant", constant_values=0.0)
+    shifted_z = cp.stack(
+        [zpix_padded[zpad + di : zpad + di + height, zpad + dj : zpad + dj + width] for di, dj in lap_offsets],
+        axis=0,
+    ).astype(cp.float32)
+    lap = cp.sum(shifted_z * lap_weights[:, None, None], axis=0, dtype=cp.float32)
+    lap = cp.abs(lap / cp.float32(3.0))
+
+    rl = cp.zeros((height, width), dtype=cp.float32)
+    l_opacity_ave = cp.zeros((height, width), dtype=cp.float32)
+    l_center = cp.zeros((height, width), dtype=cp.float32)
+    lap_pad = 1
+    lap_padded = cp.pad(lap, ((lap_pad, lap_pad), (lap_pad, lap_pad)), mode="constant", constant_values=0.0)
+    denom = float(contour_high - contour_low)
+
+    for di, dj in _LAPLACE_NEIGHBOR_OFFSETS:
+        shifted = lap_padded[lap_pad + di : lap_pad + di + height, lap_pad + dj : lap_pad + dj + width]
+        if denom != 0.0:
+            l_v = cp.clip((shifted - contour_low) / denom, 0.0, 1.0).astype(cp.float32)
+        else:
+            l_v = cp.zeros((height, width), dtype=cp.float32)
+        rl = rl + (l_v > 0).astype(cp.float32)
+        l_opacity_ave = l_opacity_ave + l_v
+        if di == 0 and dj == 0:
+            l_center = l_v.copy()
+
+    l_opacity = cp.where(rl >= cp.float32(6.0), l_opacity_ave / cp.float32(6.0), l_center)
+    l_opacity = cp.clip(l_opacity, 0.0, 1.0)
+    l_opacity[:2, :] = 0.0
+    l_opacity[-2:, :] = 0.0
+    l_opacity[:, :2] = 0.0
+    l_opacity[:, -2:] = 0.0
+    return cp.maximum(l_opacity, g_opacity)
+
+
+def _outline_kernel12_mlx(
+    *,
+    zpix: Any,
+    atom_buf: Any,
+    bio_buf: Any,
+    su_lookup: np.ndarray,
+    res_lookup: np.ndarray,
+    residue_diff: float,
+    residue_low: float,
+    residue_high: float,
+    subunit_low: float,
+    subunit_high: float,
+    contour_low: float,
+    contour_high: float,
+    kernel: int,
+):
+    if kernel not in (1, 2):
+        raise ValueError(f"outline12 kernel expects 1 or 2, got {kernel}")
+
+    mx = _require_mlx()
+
+    zpix_mx = zpix if isinstance(zpix, mx.array) else mx.array(zpix)
+    atom_mx = atom_buf if isinstance(atom_buf, mx.array) else mx.array(atom_buf)
+    bio_mx = bio_buf if isinstance(bio_buf, mx.array) else mx.array(bio_buf)
+    su_lookup_mx = mx.array(su_lookup)
+    res_lookup_mx = mx.array(res_lookup)
+
+    height, width = zpix_mx.shape
+    su_map = mx.take(su_lookup_mx, atom_mx)
+    res_map = mx.take(res_lookup_mx, atom_mx)
+    res_map_f = res_map.astype(mx.float32)
+    residue_diff_f = np.float32(residue_diff)
+
+    r_count = mx.zeros((height, width), dtype=mx.float32)
+    g_count = mx.zeros((height, width), dtype=mx.float32)
+    rg_pad = 2
+    su_padded = mx.pad(su_map, [(rg_pad, rg_pad), (rg_pad, rg_pad)], mode="constant", constant_values=9999)
+    bio_padded = mx.pad(bio_mx, [(rg_pad, rg_pad), (rg_pad, rg_pad)], mode="constant", constant_values=0)
+    res_padded = mx.pad(res_map, [(rg_pad, rg_pad), (rg_pad, rg_pad)], mode="constant", constant_values=9999)
+
+    for di, dj in _RG_OFFSETS:
+        i0 = rg_pad + di
+        j0 = rg_pad + dj
+        shifted_su = su_padded[i0 : i0 + height, j0 : j0 + width]
+        shifted_bio = bio_padded[i0 : i0 + height, j0 : j0 + width]
+        shifted_res = res_padded[i0 : i0 + height, j0 : j0 + width]
+        r_count = r_count + ((su_map != shifted_su) | (bio_mx != shifted_bio)).astype(mx.float32)
+        g_count = g_count + (mx.abs(res_map_f - shifted_res.astype(mx.float32)) > residue_diff_f).astype(mx.float32)
+
+    if residue_high != residue_low:
+        g_opacity = mx.clip((g_count - residue_low) / (residue_high - residue_low), 0.0, 1.0)
+    else:
+        g_opacity = mx.zeros((height, width), dtype=mx.float32)
+    if subunit_high != subunit_low:
+        r_opacity = mx.clip((r_count - subunit_low) / (subunit_high - subunit_low), 0.0, 1.0)
+    else:
+        r_opacity = mx.zeros((height, width), dtype=mx.float32)
+    g_opacity = mx.maximum(g_opacity, r_opacity)
+    rows = mx.arange(height)[:, None]
+    cols = mx.arange(width)[None, :]
+    g_edge_mask: Any = (rows == 0) | (rows == (height - 1)) | (cols == 0) | (cols == (width - 1))
+    g_opacity = mx.where(g_edge_mask, np.float32(0.0), g_opacity)
+
+    if kernel == 1:
+        lap_offsets = _KERNEL1_LAP_OFFSETS
+        lap_weights = mx.array(_KERNEL1_LAP_WEIGHTS)
+    else:
+        lap_offsets = _KERNEL2_LAP_OFFSETS
+        lap_weights = mx.array(_KERNEL2_LAP_WEIGHTS)
+
+    zpad = 2
+    zpix_padded = mx.pad(zpix_mx, [(zpad, zpad), (zpad, zpad)], mode="constant", constant_values=0.0)
+    shifted_z = mx.stack(
+        [zpix_padded[zpad + di : zpad + di + height, zpad + dj : zpad + dj + width] for di, dj in lap_offsets],
+        axis=0,
+    ).astype(mx.float32)
+    lap = mx.sum(shifted_z * lap_weights[:, None, None], axis=0).astype(mx.float32)
+    lap = mx.abs(lap / np.float32(3.0))
+
+    rl = mx.zeros((height, width), dtype=mx.float32)
+    l_opacity_ave = mx.zeros((height, width), dtype=mx.float32)
+    l_center = mx.zeros((height, width), dtype=mx.float32)
+    lap_pad = 1
+    lap_padded = mx.pad(lap, [(lap_pad, lap_pad), (lap_pad, lap_pad)], mode="constant", constant_values=0.0)
+    denom = float(contour_high - contour_low)
+
+    for di, dj in _LAPLACE_NEIGHBOR_OFFSETS:
+        shifted = lap_padded[lap_pad + di : lap_pad + di + height, lap_pad + dj : lap_pad + dj + width]
+        if denom != 0.0:
+            l_v = mx.clip((shifted - contour_low) / denom, 0.0, 1.0).astype(mx.float32)
+        else:
+            l_v = mx.zeros((height, width), dtype=mx.float32)
+        rl = rl + (l_v > 0).astype(mx.float32)
+        l_opacity_ave = l_opacity_ave + l_v
+        if di == 0 and dj == 0:
+            l_center = l_v
+
+    l_opacity = mx.where(rl >= np.float32(6.0), l_opacity_ave / np.float32(6.0), l_center)
+    l_opacity = mx.clip(l_opacity, 0.0, 1.0)
+    l_edge_mask: Any = (rows < 2) | (rows >= (height - 2)) | (cols < 2) | (cols >= (width - 2))
+    l_opacity = mx.where(l_edge_mask, np.float32(0.0), l_opacity)
+    return mx.maximum(l_opacity, g_opacity)
+
+
 def _composite_numpy(
     *,
     zpix: np.ndarray,
@@ -950,6 +1160,8 @@ OUTLINE34_DISPATCH = {
 
 OUTLINE12_DISPATCH = {
     "numpy": _outline_kernel12_numpy,
+    "cupy": _outline_kernel12_cupy,
+    "mlx": _outline_kernel12_mlx,
 }
 
 COMPOSITE_DISPATCH = {

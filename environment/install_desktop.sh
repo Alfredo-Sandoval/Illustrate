@@ -283,6 +283,6 @@ log "Illustrate desktop runtime is ready."
 
 if [[ "${LAUNCH_AFTER_INSTALL}" == "1" ]]; then
   cd "${REPO_ROOT}"
-  log "Launching illustrate-gui."
-  exec "${MAMBA_BIN}" run -n "${ENV_NAME}" illustrate-gui
+  log "Launching Illustrate GUI."
+  exec "${MAMBA_BIN}" run -n "${ENV_NAME}" python -m illustrate_gui
 fi
