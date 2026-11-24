@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "illustrate-py"
+version = "0.1.0"
+description = "Python molecule illustration renderer, CLI, and desktop GUI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Alfredo Sandoval" }]
+keywords = ["molecular graphics", "protein structure", "PDB", "illustration", "Goodsell"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Topic :: Scientific/Engineering :: Visualization",
+]
+dependencies = [
+  "numba>=0.61",
+  "numpy>=1.24,<3",
+  "pillow>=10,<13",
+  "typer>=0.26,<0.27",
+  "typing-extensions>=4.15",
+]
+
+[project.optional-dependencies]
+gui = [
+  "pyside6",
+]
+
+[project.urls]
+Homepage = "https://github.com/Alfredo-Sandoval/Illustrate"
+Documentation = "https://github.com/Alfredo-Sandoval/Illustrate/tree/main/docs"
+Issues = "https://github.com/Alfredo-Sandoval/Illustrate/issues"
+
+[project.scripts]
+illustrate-py = "illustrate.cli:main"
+illustrate-gui = "illustrate.gui.main:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = [
+  "illustrate",
+  "illustrate.core",
+  "illustrate.formats",
+  "illustrate.gui",
+  "illustrate.io",
+  "illustrate.rendering",
+  "illustrate.gui.controllers",
+  "illustrate.gui.panels",
+  "illustrate.gui.workers",
+  "illustrate.gui.widgets",
+  "illustrate.gui.themes",
+  "illustrate.gui.kit",
+  "illustrate.gui.kit.themes"
+]
+
+[tool.setuptools.package-data]
+"illustrate.gui" = ["icons/*"]
+"illustrate.gui.themes" = ["*.qss"]
+"illustrate.gui.kit.themes" = ["*.qss", "*/*.qss", "*/*.json", "*/icons/*.svg"]
+
+[tool.pyright]
+include = ["illustrate", "examples", "packaging", "tests"]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
+
+[tool.ruff.lint]
+extend-select = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"typing.Any".msg = "Use a concrete type or validate an object at the boundary."
+"typing_extensions.Any".msg = "Use a concrete type or validate an object at the boundary."
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-q"]

@@ -1,0 +1,52 @@
+/* Illustrate's rules for the light theme, layered on the standard theme in kit/themes
+   and shell rules. Colors are shared tokens.
+   Never write an at-sign in a comment: the theme loader reads it as a token. */
+
+/* PDB search suggestions. The completer popup is a top-level list view, so
+   it needs its own surface: the light theme draws list views transparent. */
+QListView#pdbSuggestions {
+  background: @surface-raised;
+  color: @text-primary;
+  border: 1px solid @border-default;
+  padding: 2px;
+  outline: none;
+  selection-background-color: @selection-background;
+  selection-color: @text-selected;
+}
+
+QListView#pdbSuggestions::item {
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+}
+
+QListView#pdbSuggestions::item:hover,
+QListView#pdbSuggestions::item:selected {
+  background: @selection-background;
+  color: @text-selected;
+}
+
+/* The export button opens a menu; leave room for its indicator. */
+QPushButton#exportButton {
+  padding-right: 30px;
+}
+
+QPushButton#exportButton::menu-indicator {
+  subcontrol-origin: padding;
+  subcontrol-position: center right;
+  right: 10px;
+}
+
+QLabel#rulesHeading {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+QLabel#rulesHint {
+  color: @text-muted;
+  font-size: 11px;
+}
+
+QTableWidget#rulesTable::item {
+  padding: 0px 3px;
+}

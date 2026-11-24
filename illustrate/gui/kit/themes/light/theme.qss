@@ -1,0 +1,602 @@
+/* Default light theme, from TRACE-VRG's generic widget rules. Colors are
+   at-sign names from colors.json; theme: urls resolve to this theme's icons. */
+
+QWidget {
+  color: @text-primary;
+  font-size: 13px;
+}
+
+QMainWindow {
+  background: @surface-window;
+}
+
+QFrame,
+QScrollArea,
+QGraphicsView {
+  border: 0;
+}
+
+QMainWindow::separator {
+  background: @separator;
+  width: 1px;
+  height: 1px;
+}
+
+QToolTip {
+  background: @surface-inverse;
+  color: @text-bright;
+  border: none;
+  padding: 6px 9px;
+}
+
+QPushButton,
+QToolButton {
+  background: @surface-window;
+  border: 1px solid @border-default;
+  border-radius: 8px;
+  padding: 4px 12px;
+  min-height: 22px;
+}
+
+QPushButton:hover,
+QToolButton:hover {
+  background: @surface-hover;
+  border-color: @border-hover;
+}
+
+QPushButton:pressed,
+QToolButton:pressed {
+  background: @surface-pressed;
+}
+
+QPushButton:checked,
+QToolButton:checked {
+  background: @surface-nav-checked;
+  color: @text-selected;
+}
+
+QPushButton:focus,
+QToolButton:focus {
+  border: 1px solid @border-focus;
+}
+
+QPushButton:disabled,
+QToolButton:disabled {
+  color: @text-disabled;
+  background: @surface-sunken;
+  border-color: @border-subtle;
+}
+
+QPushButton[buttonRole="navigation"] {
+  background: transparent;
+  border: 1px solid transparent;
+  text-align: left;
+  padding: 0 10px;
+  border-radius: 7px;
+  min-height: 34px;
+  max-height: 34px;
+}
+
+QPushButton[buttonRole="navigation"]:hover {
+  background: @surface-nav-hover;
+}
+
+QPushButton[buttonRole="navigation"]:checked {
+  background: @surface-nav-checked;
+  color: @text-selected;
+}
+
+QPushButton[buttonRole="navigation"]:focus {
+  border-color: @border-focus;
+}
+
+QPushButton[buttonRole="icon"] {
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 0;
+  min-height: 0;
+  border-radius: 7px;
+}
+
+QPushButton[buttonRole="icon"]:hover {
+  background: @surface-icon-hover;
+}
+
+QPushButton[buttonRole="icon"]:focus {
+  border-color: @border-focus;
+}
+
+QPushButton[buttonRole="icon"]:disabled {
+  background: transparent;
+}
+
+QPushButton[buttonRole="secondary"] {
+  border-color: @border-default;
+  border-radius: 9px;
+}
+
+QPushButton[buttonRole="primary"] {
+  background: @surface-inverse;
+  color: @text-bright;
+  border-color: @surface-inverse;
+  border-radius: 8px;
+  padding: 6px 18px;
+}
+
+QPushButton[buttonRole="primary"]:hover {
+  background: @surface-inverse-hover;
+}
+
+QLineEdit,
+QTextEdit,
+QPlainTextEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox {
+  background: @surface-window;
+  border: 1px solid @border-input;
+  border-radius: 6px;
+  padding: 3px 6px;
+  min-height: 22px;
+  selection-background-color: @selection-background;
+  selection-color: @text-selected;
+}
+
+QLineEdit:focus,
+QTextEdit:focus,
+QPlainTextEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus {
+  border-color: @border-focus;
+}
+
+QLineEdit:disabled,
+QTextEdit:disabled,
+QPlainTextEdit:disabled,
+QComboBox:disabled,
+QSpinBox:disabled,
+QDoubleSpinBox:disabled {
+  color: @text-disabled;
+  background: @surface-sunken;
+  border-color: @border-subtle;
+}
+
+QComboBox QAbstractItemView {
+  background: @surface-window;
+  border: 1px solid @border-input;
+  selection-background-color: @surface-pressed;
+  selection-color: @text-selected;
+  padding: 4px;
+}
+
+QComboBox,
+QSpinBox,
+QDoubleSpinBox {
+  padding-right: 30px;
+}
+
+QComboBox::drop-down {
+  subcontrol-origin: border;
+  subcontrol-position: top right;
+  width: 28px;
+  border: none;
+  border-top-right-radius: 6px;
+  border-bottom-right-radius: 6px;
+  margin: 1px;
+  background: @surface-sunken;
+}
+
+QComboBox::drop-down:hover {
+  background: @surface-control-hover;
+}
+
+QComboBox::down-arrow,
+QSpinBox::down-arrow,
+QDoubleSpinBox::down-arrow {
+  image: url(theme:chevron-down.svg);
+  width: 12px;
+  height: 12px;
+}
+
+QSpinBox::up-arrow,
+QDoubleSpinBox::up-arrow {
+  image: url(theme:chevron-up.svg);
+  width: 12px;
+  height: 12px;
+}
+
+QSpinBox::up-button,
+QDoubleSpinBox::up-button {
+  subcontrol-origin: border;
+  subcontrol-position: top right;
+  width: 26px;
+  height: 15px;
+  border: none;
+  border-top-right-radius: 6px;
+  margin: 1px 1px 0 0;
+  background: @surface-sunken;
+}
+
+QSpinBox::down-button,
+QDoubleSpinBox::down-button {
+  subcontrol-origin: border;
+  subcontrol-position: bottom right;
+  width: 26px;
+  height: 15px;
+  border: none;
+  border-bottom-right-radius: 6px;
+  margin: 0 1px 1px 0;
+  background: @surface-sunken;
+}
+
+QSpinBox::up-button:hover,
+QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover,
+QDoubleSpinBox::down-button:hover {
+  background: @surface-control-hover;
+}
+
+QCheckBox {
+  spacing: 7px;
+}
+
+QSlider::groove:horizontal {
+  background: @slider-groove;
+  height: 3px;
+  border-radius: 1px;
+}
+
+QSlider::sub-page:horizontal {
+  background: @slider-fill;
+  border-radius: 1px;
+}
+
+QSlider::handle:horizontal {
+  background: @surface-window;
+  border: 1px solid @slider-handle-border;
+  width: 12px;
+  height: 12px;
+  margin: -5px 0;
+  border-radius: 6px;
+}
+
+QSlider::handle:horizontal:disabled {
+  background: @slider-handle-disabled;
+  border-color: @slider-handle-disabled-border;
+}
+
+QMenuBar {
+  background: @surface-window;
+  border-bottom: 1px solid @border-subtle;
+}
+
+QMenuBar::item:selected,
+QMenu::item:selected {
+  background: @surface-pressed;
+  color: @text-selected;
+}
+
+QMenu {
+  background: @surface-window;
+  border: 1px solid @border-input;
+  padding: 5px;
+}
+
+QMenu::item {
+  padding: 6px 24px;
+  border-radius: 4px;
+}
+
+QMenu::separator {
+  height: 1px;
+  background: @surface-pressed;
+  margin: 4px 6px;
+}
+
+QScrollBar:vertical {
+  width: 8px;
+  background: transparent;
+}
+
+QScrollBar:horizontal {
+  height: 8px;
+  background: transparent;
+}
+
+QScrollBar::handle:vertical,
+QScrollBar::handle:horizontal {
+  background: @scrollbar-handle;
+  border-radius: 3px;
+  margin: 1px;
+}
+
+QScrollBar::handle:vertical {
+  min-height: 24px;
+}
+
+QScrollBar::handle:horizontal {
+  min-width: 24px;
+}
+
+QScrollBar::handle:hover {
+  background: @scrollbar-handle-hover;
+}
+
+QScrollBar::add-line,
+QScrollBar::sub-line {
+  width: 0;
+  height: 0;
+}
+
+QScrollBar::add-page,
+QScrollBar::sub-page {
+  background: transparent;
+}
+
+QStatusBar {
+  background: @surface-window;
+  border-top: 1px solid @border-subtle;
+  color: @text-secondary;
+  font-size: 11px;
+}
+
+QStatusBar::item {
+  border: none;
+}
+
+/* Tabs, group boxes, and headers from SIESTA's light theme, which shares this
+   palette; list rows from TRACE-VRG's camera and device lists. */
+
+QTabWidget::pane {
+  border: none;
+}
+
+QTabBar {
+  background: transparent;
+  qproperty-expanding: false;
+  qproperty-drawBase: 0;
+}
+
+QTabBar::tab {
+  background: transparent;
+  color: @text-muted;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  margin: 4px 2px;
+  font-size: 12px;
+}
+
+QTabBar::tab:selected {
+  background: @surface-nav-checked;
+  color: @text-primary;
+}
+
+QTabBar::tab:hover:!selected {
+  background: @surface-hover;
+}
+
+QGroupBox {
+  background: transparent;
+  border: none;
+  margin-top: 16px;
+  padding-top: 10px;
+}
+
+QGroupBox::title {
+  subcontrol-origin: margin;
+  subcontrol-position: top left;
+  color: @text-muted;
+  font-weight: 500;
+}
+
+QGroupBox[title=""] {
+  margin-top: 0px;
+  padding-top: 0px;
+}
+
+QHeaderView {
+  background: @surface-panel;
+  border: none;
+}
+
+QHeaderView::section,
+QTableCornerButton::section {
+  background: @surface-panel;
+  color: @text-muted;
+  border: none;
+  font-size: 11px;
+  padding: 6px;
+}
+
+QListView::item {
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+
+QListView::item:hover {
+  background: @surface-nav-hover;
+}
+
+QListView::item:selected {
+  background: @surface-nav-checked;
+  color: @text-selected;
+}
+
+QTreeView::item,
+QTableView::item {
+  padding: 3px 5px;
+  border: none;
+}
+
+/* Further widgets from the TRACE-palette applications: toolbars, radio buttons,
+   splitters, and graphics views from FOCUS; docks, item views, check boxes, and
+   progress bars from SIESTA. */
+
+QLabel,
+QCheckBox,
+QRadioButton {
+  background-color: transparent;
+}
+
+QCheckBox,
+QRadioButton {
+  spacing: 7px;
+}
+
+QCheckBox:disabled,
+QRadioButton:disabled {
+  color: @text-disabled;
+}
+
+QRadioButton::indicator {
+  width: 12px;
+  height: 12px;
+  border: 2px solid @border-strong;
+  border-radius: 8px;
+  background-color: transparent;
+}
+
+QRadioButton::indicator:checked {
+  background-color: @slider-fill;
+  border-color: @slider-fill;
+}
+
+QToolBar {
+  background-color: @surface-window;
+  border: none;
+  spacing: 10px;
+  padding: 6px 10px;
+}
+
+QToolBar::separator {
+  background-color: @border-subtle;
+  width: 1px;
+  margin: 4px 10px;
+}
+
+QDockWidget {
+  border: none;
+}
+
+QDockWidget::title {
+  background: @surface-window;
+  padding: 9px 10px;
+}
+
+QListView,
+QTreeView,
+QTableView {
+  background: transparent;
+  alternate-background-color: @surface-panel;
+  border: none;
+  gridline-color: @separator;
+  selection-background-color: @surface-nav-checked;
+  selection-color: @text-primary;
+  outline: none;
+}
+
+QTreeView::item:hover,
+QTableView::item:hover {
+  background: @surface-hover;
+}
+
+QTreeView::item:selected,
+QTableView::item:selected {
+  background: @surface-nav-checked;
+  color: @text-primary;
+}
+
+QProgressBar {
+  background: @surface-panel;
+  border: none;
+  border-radius: 5px;
+  text-align: center;
+  min-height: 10px;
+}
+
+QProgressBar::chunk {
+  background: @slider-fill;
+  border-radius: 5px;
+}
+
+QSplitter::handle {
+  background-color: transparent;
+}
+
+QSplitter::handle:hover {
+  background-color: @border-subtle;
+}
+
+QSplitter::handle:horizontal {
+  width: 3px;
+}
+
+QSplitter::handle:vertical {
+  height: 3px;
+}
+
+QGraphicsView {
+  background-color: @surface-panel;
+  border: none;
+}
+
+/* Check boxes, vertical sliders, and divider lines from SIESTA's light theme,
+   which shares this palette; the check mark is Radium's. */
+
+QCheckBox::indicator {
+  width: 14px;
+  height: 14px;
+  border: 1px solid @border-strong;
+  border-radius: 4px;
+  background: @surface-window;
+}
+
+QCheckBox::indicator:checked {
+  background: @accent;
+  border-color: @accent;
+  image: url(theme:check.svg);
+}
+
+QCheckBox::indicator:disabled {
+  background: @surface-sunken;
+  border-color: @border-subtle;
+}
+
+QSlider::groove:vertical {
+  background: @slider-groove;
+  width: 3px;
+  border-radius: 1px;
+}
+
+QSlider::add-page:vertical {
+  background: @slider-fill;
+  border-radius: 1px;
+}
+
+QSlider::handle:vertical {
+  background: @surface-window;
+  border: 1px solid @slider-handle-border;
+  width: 12px;
+  height: 12px;
+  margin: 0 -5px;
+  border-radius: 6px;
+}
+
+QSlider::handle:vertical:disabled {
+  background: @slider-handle-disabled;
+  border-color: @slider-handle-disabled-border;
+}
+
+QFrame[frameShape="4"] {
+  border: none;
+  border-top: 1px solid @separator;
+  max-height: 1px;
+}
+
+QFrame[frameShape="5"] {
+  border: none;
+  border-left: 1px solid @separator;
+  max-width: 1px;
+}

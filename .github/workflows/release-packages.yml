@@ -1,0 +1,111 @@
+name: Build Release Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (without v prefix, optional)"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [[ "${REF_TYPE}" == "tag" ]]; then
+            tag="${REF_NAME}"
+            version="${tag#v}"
+          elif [[ -n "${INPUT_VERSION:-}" ]]; then
+            version="${INPUT_VERSION}"
+            tag="v${version}"
+          else
+            version="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          payload = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(payload.get("project", {}).get("version", "0.0.0"))
+          PY
+          )"
+            tag="v${version}"
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+  build-macos:
+    runs-on: macos-15
+    needs: meta
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v4
+      - name: Install packaging dependencies
+        run: uv pip install --system -r environment/macos/requirements.txt pyinstaller .
+      - name: Build macOS app + dmg
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: bash packaging/macos/build_app.sh --version "${VERSION}"
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-packages
+          path: |
+            dist/package/macos/*.dmg
+            dist/package/macos/*-macOS-app.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs:
+      - meta
+      - build-macos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/release-assets
+          merge-multiple: true
+      - name: Generate latest.json manifest
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mac_files=(dist/release-assets/*-macOS.dmg)
+          if (( ${#mac_files[@]} != 1 )); then
+            echo "Expected one macOS disk image, found ${#mac_files[@]}." >&2
+            exit 1
+          fi
+          python packaging/release/generate_latest_manifest.py \
+            --version "${VERSION}" \
+            --tag "${TAG}" \
+            --repo-slug "Alfredo-Sandoval/Illustrate" \
+            --macos-file "${mac_files[0]}" \
+            --out "dist/release-assets/latest.json"
+      - name: Publish GitHub Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.meta.outputs.tag }}
+          files: |
+            dist/release-assets/*-macOS.dmg
+            dist/release-assets/*-macOS-app.zip
+            dist/release-assets/latest.json

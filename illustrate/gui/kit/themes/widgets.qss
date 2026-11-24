@@ -1,0 +1,104 @@
+/* Rules for the gui package's shell and widgets, layered on every theme.
+   Colors are shared color tokens only, so these rules hold in every theme.
+   Never write an at-sign in a comment: the loader reads it as a token. */
+
+/* ---- Shell regions ---------------------------------------------------- */
+
+QWidget#navigationPanel {
+  background: @surface-panel;
+}
+
+QWidget#workspace,
+QWidget#inspectorPanel,
+QWidget#inspectorContent {
+  background: @surface-window;
+}
+
+QLabel#navigationBrand {
+  font-size: 14px;
+  font-weight: 600;
+  padding: 0 10px;
+  letter-spacing: 1px;
+}
+
+QLabel#navigationSection {
+  color: @text-secondary;
+  font-size: 12px;
+  padding: 0 10px;
+}
+
+QLabel#navigationDetail {
+  color: @text-muted;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+QWidget#navigationPanel QAbstractItemView {
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+QLabel#workspaceTitle,
+QLabel#inspectorHeading {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* Inspector form labels are quieter than their fields. */
+QWidget#inspectorContent QLabel,
+QLabel#formLabel {
+  color: @text-muted;
+  font-size: 12px;
+}
+
+/* ---- Collapsible sections --------------------------------------------- */
+
+QFrame#sectionRule {
+  background: @border-subtle;
+  border: none;
+}
+
+QToolButton#sectionToggle,
+QToolButton#sectionToggle:checked,
+QToolButton#sectionToggle:pressed,
+QToolButton#sectionToggle:hover {
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 7px 0;
+  color: @text-primary;
+}
+
+/* ---- Action bar ------------------------------------------------------- */
+
+QFrame#actionSurface {
+  background: @surface-raised;
+  border: 1px solid @border-input;
+  border-radius: 12px;
+}
+
+QLabel#actionHeading {
+  color: @text-secondary;
+}
+
+QLabel#actionDetail,
+QWidget#actionFooter QCheckBox {
+  color: @text-secondary;
+  font-size: 11px;
+}
+
+/* ---- Primary button states -------------------------------------------- */
+
+QPushButton[buttonRole="primary"]:disabled {
+  background: @surface-sunken;
+  border-color: @border-subtle;
+  color: @text-disabled;
+}
+
+/* The primary command needs running again, for example after settings
+   changed. Keep after the disabled rule: equal specificity, later wins. */
+QPushButton[buttonRole="primary"][attention="true"] {
+  background: @warning;
+  border-color: @warning;
+  color: @surface-window;
+}
