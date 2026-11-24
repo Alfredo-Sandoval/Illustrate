@@ -1,14 +1,23 @@
+<h1 align="center">Illustrate</h1>
+
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Alfredo-Sandoval/Illustrate/main/docs/images/01_classic_goodsell.png" alt="Hemoglobin rendered with Illustrate" width="320">
+  <strong>Python implementation of David Goodsell’s Illustrate</strong><br>
+  Turn PDB structures into molecular illustrations from a desktop app, the command line, or Python.
 </p>
 
-# Illustrate
+<p align="center">
+  <a href="https://pypi.org/project/illustrate-py/"><img src="https://img.shields.io/pypi/v/illustrate-py?logo=pypi&amp;logoColor=white" alt="PyPI"></a>
+  <a href="https://pypi.org/project/illustrate-py/"><img src="https://img.shields.io/python/required-version-toml?tomlFilePath=https://raw.githubusercontent.com/Alfredo-Sandoval/Illustrate/main/pyproject.toml&amp;logo=python&amp;logoColor=white" alt="Python 3.10 or newer"></a>
+  <a href="https://github.com/Alfredo-Sandoval/Illustrate/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/illustrate-py" alt="Apache-2.0 license"></a>
+</p>
 
-[![PyPI](https://img.shields.io/pypi/v/illustrate-py)](https://pypi.org/project/illustrate-py/)
-[![Python](https://img.shields.io/python/required-version-toml?tomlFilePath=https://raw.githubusercontent.com/Alfredo-Sandoval/Illustrate/main/pyproject.toml)](https://pypi.org/project/illustrate-py/)
-[![License](https://img.shields.io/pypi/l/illustrate-py)](https://github.com/Alfredo-Sandoval/Illustrate/blob/main/LICENSE)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Alfredo-Sandoval/Illustrate/main/docs/images/hero_default.png" alt="Hemoglobin in the Default preset" width="260">
+  <img src="https://raw.githubusercontent.com/Alfredo-Sandoval/Illustrate/main/docs/images/hero_cool_blues.png" alt="Hemoglobin in the Cool Blues preset" width="260">
+  <img src="https://raw.githubusercontent.com/Alfredo-Sandoval/Illustrate/main/docs/images/hero_dark_chain_colors.png" alt="Hemoglobin in the Dark Chain Colors preset" width="260">
+</p>
 
-Illustrate turns PDB structures into molecular illustrations. It draws atoms as shaded spheres and uses ordered rules to assign colors and radii. This Python implementation of David Goodsell’s renderer includes a macOS desktop app, a CLI, and a Python API.
+Illustrate draws atoms as shaded spheres and uses ordered rules to assign colors and radii. Above is the bundled hemoglobin example (PDB 2HHB) in three of the eight built-in presets.
 
 ## Install on macOS
 
