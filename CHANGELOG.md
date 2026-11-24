@@ -7,4 +7,4 @@ Initial release of the Python port of David Goodsell’s Illustrate. Includes th
 
 - Render local PDB files or fetch structures by PDB ID. The CLI also reads classic Illustrate command files.
 - Start from eight presets and customize atom selection, lighting, and outlines. Share JSON render settings between the desktop app and CLI.
-- Render with NumPy or MLX on Apple Silicon. Export PNG or an SVG with an embedded PNG. The Python API also writes P3 PNM.
+- Render on the CPU with Numba or NumPy, or with MLX on Apple Silicon. Export PNG or an SVG with an embedded PNG. The Python API also writes P3 PNM.

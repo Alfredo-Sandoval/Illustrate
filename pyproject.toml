@@ -21,7 +21,8 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
-  "numba>=0.61",
+  # Numba has no Intel macOS wheels for Python 3.14+; those installs render with NumPy.
+  "numba>=0.61; sys_platform != 'darwin' or platform_machine != 'x86_64' or python_version < '3.14'",
   "numpy>=1.24,<3",
   "pillow>=10,<13",
   "typer>=0.26,<0.27",

@@ -8,13 +8,13 @@ Illustrate turns PDB structures into molecular illustrations. It draws atoms as 
 
 ## Install on macOS
 
-The GitHub install requires Python 3.10 or newer and Git.
+Install in an environment with Python 3.10 or newer.
 
 ```bash
-python -m pip install "illustrate-py[gui] @ git+https://github.com/Alfredo-Sandoval/Illustrate.git"
+python -m pip install "illustrate-py[gui]"
 ```
 
-Once the package is published on PyPI, use `python -m pip install "illustrate-py[gui]"`. The `gui` extra installs PySide6. Omit it for the CLI and Python API.
+The `gui` extra installs PySide6. Omit it for the CLI and Python API.
 
 ## Make a figure
 

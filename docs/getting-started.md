@@ -2,14 +2,14 @@
 
 ## Install on macOS
 
-Install in an environment with Python 3.10 or newer and Git on your path.
+Install in an environment with Python 3.10 or newer.
 
 ```bash
-python -m pip install "illustrate-py[gui] @ git+https://github.com/Alfredo-Sandoval/Illustrate.git"
+python -m pip install "illustrate-py[gui]"
 illustrate-gui
 ```
 
-Once the package is published on PyPI, use `python -m pip install "illustrate-py[gui]"`. Omit `[gui]` for the CLI and Python API.
+Omit `[gui]` for the CLI and Python API.
 
 ### Install from a checkout
 
