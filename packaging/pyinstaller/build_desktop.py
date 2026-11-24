@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 from importlib import import_module
+from importlib.util import find_spec
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
@@ -71,6 +73,36 @@ def _ensure_package_metadata(version: str) -> None:
         )
 
 
+def _mlx_arguments() -> list[str]:
+    """Bundle MLX, which the renderer imports by name so PyInstaller misses it.
+
+    ``mlx.core`` links ``mlx/lib/libmlx.dylib``, and MLX loads its GPU kernels
+    from ``mlx.metallib`` beside that library. The compiled extension also
+    imports ``mlx._reprlib_fix`` as it starts. The C headers are left out.
+    """
+    spec = find_spec("mlx.core")
+    if spec is None or spec.origin is None:
+        if sys.platform == "darwin" and platform.machine() == "arm64":
+            raise SystemExit(
+                "Missing dependency: MLX. Apple Silicon builds must bundle it. "
+                "Run `make env` or install environment/macos/requirements.txt."
+            )
+        return []
+    metallib = Path(spec.origin).parent / "lib" / "mlx.metallib"
+    if not metallib.is_file():
+        raise SystemExit(f"MLX is installed without its Metal library: {metallib}")
+    return [
+        "--hidden-import",
+        "mlx.core",
+        "--hidden-import",
+        "mlx._reprlib_fix",
+        "--collect-binaries",
+        "mlx",
+        "--add-data",
+        f"{metallib}{os.pathsep}mlx/lib",
+    ]
+
+
 def _pyinstaller_command(
     *,
     app_name: str,
@@ -96,6 +128,7 @@ def _pyinstaller_command(
         "illustrate.rendering.numba_kernels",
         "--hidden-import",
         "numba",
+        *_mlx_arguments(),
         # The GUI loads its QSS, color tables, SVG icons, stylesheets and window icons
         # from package data at runtime.
         "--collect-data",
