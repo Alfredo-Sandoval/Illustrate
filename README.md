@@ -4,6 +4,10 @@
 
 # Illustrate
 
+[![PyPI](https://img.shields.io/pypi/v/illustrate-py)](https://pypi.org/project/illustrate-py/)
+[![Python](https://img.shields.io/python/required-version-toml?tomlFilePath=https://raw.githubusercontent.com/Alfredo-Sandoval/Illustrate/main/pyproject.toml)](https://pypi.org/project/illustrate-py/)
+[![License](https://img.shields.io/pypi/l/illustrate-py)](https://github.com/Alfredo-Sandoval/Illustrate/blob/main/LICENSE)
+
 Illustrate turns PDB structures into molecular illustrations. It draws atoms as shaded spheres and uses ordered rules to assign colors and radii. This Python implementation of David Goodsell’s renderer includes a macOS desktop app, a CLI, and a Python API.
 
 ## Install on macOS
